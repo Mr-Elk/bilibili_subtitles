@@ -1,0 +1,210 @@
+import io
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from bilibili_subtitles import cli
+except ImportError:
+    cli = None
+
+main = getattr(cli, "main", None)
+
+
+class CliTests(unittest.TestCase):
+    def test_no_browser_cookies_option_reaches_default_fetcher(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Captioned video",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                    }
+                ]
+            },
+        }
+        calls = []
+
+        def fake_fetch(url, *, use_browser_cookies):
+            calls.append((url, use_browser_cookies))
+            return info
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(cli, "fetch_info", side_effect=fake_fetch):
+                exit_code = main(
+                    [
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "--output-root",
+                        temp_dir,
+                        "--no-browser-cookies",
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            calls,
+            [("https://www.bilibili.com/video/BV1Ab411C7De", False)],
+        )
+
+    def test_package_module_exposes_cli_help(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "bilibili_subtitles", "--help"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Extract existing Bilibili captions", completed.stdout)
+
+    def test_extracts_video_and_reports_output_directory(self):
+        self.assertIsNotNone(main, "main must exist")
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Captioned video",
+            "uploader": "Example uploader",
+            "formats": [],
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\n字幕\n",
+                    }
+                ]
+            },
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exit_code = main(
+                [
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    "--output-root",
+                    temp_dir,
+                ],
+                info_fetcher=lambda _url: info,
+                clock=lambda: datetime(2026, 8, 14, 10, 30, tzinfo=timezone.utc),
+                stdout=stdout,
+                stderr=stderr,
+            )
+            expected_output = Path(temp_dir) / "BV1Ab411C7De"
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((expected_output / "index.md").is_file())
+            self.assertTrue((expected_output / "part-001.md").is_file())
+            self.assertIn("Extracted 1 part(s)", stdout.getvalue())
+            self.assertIn(str(expected_output), stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_rejects_unsupported_url_before_calling_yt_dlp(self):
+        fetch_called = False
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def unexpected_fetch(_url):
+            nonlocal fetch_called
+            fetch_called = True
+            raise AssertionError("yt-dlp must not receive an unsupported URL")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                exit_code = main(
+                    [
+                        "https://b23.tv/example",
+                        "--output-root",
+                        temp_dir,
+                    ],
+                    info_fetcher=unexpected_fetch,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except Exception as error:
+                self.fail(f"CLI must report invalid input without a traceback: {error}")
+
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(fetch_called)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Only direct HTTPS", stderr.getvalue())
+
+    def test_reports_when_video_has_no_existing_captions(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Video without captions",
+            "formats": [],
+            "subtitles": {
+                "danmaku": [
+                    {
+                        "ext": "xml",
+                        "url": "https://comment.bilibili.com/123.xml",
+                    }
+                ]
+            },
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                exit_code = main(
+                    [
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "--output-root",
+                        temp_dir,
+                    ],
+                    info_fetcher=lambda _url: info,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except Exception as error:
+                self.fail(f"CLI must report missing captions without a traceback: {error}")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("No existing captions were found", stderr.getvalue())
+
+    def test_reports_extraction_failure_without_a_traceback(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def failing_fetch(_url):
+            raise RuntimeError("network unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                exit_code = main(
+                    [
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "--output-root",
+                        temp_dir,
+                    ],
+                    info_fetcher=failing_fetch,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except Exception as error:
+                self.fail(f"CLI must report extraction failures cleanly: {error}")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "Error: network unavailable\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

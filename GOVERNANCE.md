@@ -64,6 +64,8 @@ Git 只保存源码、测试、协议、提示模板和治理文档。下列内�
 ## 数据与协议
 
 - `manifest.json` schema v1 是后续本地工具的稳定目录接口；Markdown 服务于人工阅读。
+- 工具只拥有顶层 `manifest.json`、`index.md` 和严格命名的 `part-NNN.md`。其他文件和目录属于用户；读取必须忽略，全量刷新必须原样保留。
+- manifest 必须继续拒绝缺失正文和孤立的严格 `part-NNN.md`，但 `part-NNN-learning-note-draft.md` 等非规范文件不是字幕，也不是 manifest 孤立项。
 - `Status` 必须按 schema v1 严格核对清单与字幕文件。只有清单确实不存在时才允许旧 Markdown 迁移；清单存在但损坏、版本不支持或文件不一致时必须失败关闭。
 - 原字幕文件保持只读语义。任何校正、推断或摘要必须写入独立成果，并保留时间戳、来源和不确定性。
 - `no_subtitles` 是显式覆盖状态，不得伪造空字幕或把缺失字幕当作提取成功。

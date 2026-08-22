@@ -88,7 +88,7 @@ class ExtractToMarkdownTests(unittest.TestCase):
         self.assertEqual(part_events[-1].part_number, 1)
         self.assertEqual((part_events[-1].current, part_events[-1].total), (1, 1))
 
-    def test_successful_rerun_replaces_stale_files(self):
+    def test_successful_rerun_replaces_managed_files_and_preserves_user_files(self):
         info = {
             "_type": "video",
             "id": "BV1Ab411C7De",
@@ -107,7 +107,9 @@ class ExtractToMarkdownTests(unittest.TestCase):
             output_root = Path(temp_dir)
             output_dir = output_root / "BV1Ab411C7De"
             output_dir.mkdir()
-            (output_dir / "stale.md").write_text("stale\n", encoding="utf-8")
+            (output_dir / "part-999.md").write_text("stale\n", encoding="utf-8")
+            note = output_dir / "part-001-learning-note-draft.md"
+            note.write_text("private note\n", encoding="utf-8")
 
             extract_to_markdown(
                 "https://www.bilibili.com/video/BV1Ab411C7De",
@@ -116,7 +118,8 @@ class ExtractToMarkdownTests(unittest.TestCase):
                 extracted_at="2026-08-14T18:30:00+08:00",
             )
 
-            self.assertFalse((output_dir / "stale.md").exists())
+            self.assertFalse((output_dir / "part-999.md").exists())
+            self.assertEqual(note.read_text(encoding="utf-8"), "private note\n")
             self.assertIn(
                 "[00:00:01] 新字幕",
                 (output_dir / "part-001.md").read_text(encoding="utf-8"),

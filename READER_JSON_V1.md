@@ -26,6 +26,8 @@
 - `search`：`file`、`timestamp`、`seconds`、`text`、`is_match`。`is_match=false` 表示上下文字幕。
 - `slice`：`file`、`timestamp`、`seconds`、`text`。
 
+目录读取优先使用 `manifest.json` 中状态为 `captioned` 的 `file`；没有 manifest 的兼容目录只接受严格的 `part-NNN.md`。学习笔记等其他文件不进入 `items`，缺失或孤立的严格字幕文件仍按 manifest 不一致失败关闭。
+
 ## 限长约定
 
 JSON 使用 UTF-8 紧凑输出。超过字符上限时，工具按原顺序保留尽可能多的完整条目，并设置 `truncated=true`。输出始终是可解析的 JSON；如果连协议元数据都无法放入指定上限，命令会失败并提示提高 `MaxChars`。

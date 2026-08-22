@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .core import PartMetadata, parse_bv_url, parse_srt, render_markdown, subtitle_choices
 from .output_manifest import (
+    is_transcript_filename,
     load_or_migrate_manifest,
     new_manifest,
     render_index,
@@ -282,6 +283,14 @@ def _extract_to_markdown_locked(
                 "part_number": selected_page,
             }
         else:
+            if output_dir.is_dir():
+                shutil.copytree(output_dir, staging_dir, dirs_exist_ok=True)
+                for existing_path in staging_dir.iterdir():
+                    if (
+                        existing_path.is_file()
+                        and is_transcript_filename(existing_path.name)
+                    ):
+                        existing_path.unlink()
             manifest = new_manifest(
                 bvid=parsed_url.bvid,
                 title=info_title,

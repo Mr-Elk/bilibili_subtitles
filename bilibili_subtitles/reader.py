@@ -3,7 +3,12 @@ import json
 from pathlib import Path
 import re
 
-from .output_manifest import ManifestValidationError, read_manifest
+from .output_manifest import (
+    ManifestValidationError,
+    is_transcript_filename,
+    read_manifest,
+    transcript_paths,
+)
 
 
 class ReaderInputError(ValueError):
@@ -47,13 +52,24 @@ def transcript_files(target: str | Path) -> list[Path]:
     if not path.exists():
         raise ReaderInputError(f"Path does not exist: {path}")
     if path.is_file():
+        if not is_transcript_filename(path.name):
+            raise ReaderInputError("Only a canonical part-NNN.md transcript can be read.")
         return [path]
-    files = sorted(
-        (item for item in path.glob("part-*.md") if item.is_file()),
-        key=lambda item: item.name,
-    )
+    manifest_path = path / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = read_manifest(path)
+        except ManifestValidationError as error:
+            raise ReaderInputError(str(error)) from error
+        files = [
+            path / part["file"]
+            for part in manifest["parts"]
+            if part["status"] == "captioned"
+        ]
+    else:
+        files = transcript_paths(path)
     if not files:
-        raise ReaderInputError(f"No part-*.md transcripts found in: {path}")
+        raise ReaderInputError(f"No canonical part-NNN.md transcripts found in: {path}")
     return files
 
 

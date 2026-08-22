@@ -66,11 +66,11 @@ bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx" -UseBrowserCookies
 bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx?p=3" -NoProgress
 ```
 
-输出目录中每个 BV 号对应一个文件夹：`index.md` 是给人看的分 P 索引，`manifest.json` 是供后续工具读取的稳定结构化清单，`part-001.md` 等文件保存带 `[HH:MM:SS]` 时间戳的字幕。
+输出目录中每个 BV 号对应一个文件夹：`index.md` 是给人看的分 P 索引，`manifest.json` 是供后续工具读取的稳定结构化清单，严格命名为 `part-001.md` 等文件保存带 `[HH:MM:SS]` 时间戳的字幕。工具只拥有这三类路径；`part-001-learning-note-draft.md` 等其他文件属于用户，不会被当作字幕。
 
 提取时会在错误输出中实时显示元数据、字幕轨、分 P 准备和原子发布阶段，以及从命令开始计算的耗时；进度不包含字幕正文、Cookie 或授权信息。最终计数与输出目录仍写入标准输出。按 `Ctrl+C` 取消会清理临时目录；如果中断发生在发布期间，会恢复上一次结果并返回取消状态。
 
-完整提取成功后会整体替换这个 BV 的旧结果；单 P 提取则原子更新该 P，并保留同目录里的其他分 P。旧版目录第一次执行单 P 更新时，会自动从已有 Markdown 迁移出清单。任何中途失败都会保留上一次成功结果，同一 BV 的并发提取会被拒绝。
+完整提取成功后会替换 manifest、索引和严格命名的旧字幕，同时保留同目录里的学习笔记及其他非受管文件；单 P 提取则原子更新该 P，并保留其他分 P 和用户文件。旧版目录第一次执行单 P 更新时，会自动从已有 Markdown 迁移出清单。任何中途失败都会保留上一次成功结果，同一 BV 的并发提取会被拒绝。
 
 ## 少量读取，减少 token
 
@@ -94,7 +94,7 @@ bili-subtitles -Action Map -Target "D:\subtitles\BVxxxxxxxxxx" -ChunkChars 5000
 bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键词" -Format Json
 ```
 
-这些读取动作默认限制终端输出长度，也可以用 `-MaxChars` 调整。`Status` 严格核对 `manifest.json` 与字幕文件，报告覆盖范围、上次请求以及 `captioned` / `no_subtitles` 数量；清单损坏、版本不支持或文件不一致时会失败，不会把它静默当成旧格式。`-Format Json` 输出紧凑的 UTF-8 JSON；达到长度限制时只移除完整条目并标记 `truncated`，不会截断成无效 JSON。协议见 [READER_JSON_V1.md](READER_JSON_V1.md)。它们只读取本地清单和 `part-*.md`，不会初始化 yt-dlp、访问 B 站或调用大模型。运行 `bili-subtitles --help` 查看简明帮助。
+这些读取动作默认限制终端输出长度，也可以用 `-MaxChars` 调整。目录读取以 `manifest.json` 引用为准；没有 manifest 的兼容目录只接受严格的 `part-NNN.md`。`Status` 核对 manifest 与受管字幕文件，报告覆盖范围、上次请求以及 `captioned` / `no_subtitles` 数量；清单损坏、版本不支持、缺失正文或孤立的规范字幕文件会失败，而学习笔记等非规范文件会被忽略。`-Format Json` 输出紧凑的 UTF-8 JSON；达到长度限制时只移除完整条目并标记 `truncated`，不会截断成无效 JSON。协议见 [READER_JSON_V1.md](READER_JSON_V1.md)。这些动作不会初始化 yt-dlp、访问 B 站或调用大模型。运行 `bili-subtitles --help` 查看简明帮助。
 
 ## 项目结构
 

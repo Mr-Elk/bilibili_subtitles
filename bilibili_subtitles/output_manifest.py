@@ -11,6 +11,22 @@ class ManifestValidationError(ValueError):
     """Raised when an existing subtitle manifest cannot be trusted."""
 
 
+def is_transcript_filename(filename: str) -> bool:
+    """Return whether a top-level name is owned as a canonical transcript."""
+    return _PART_FILE.fullmatch(filename) is not None
+
+
+def transcript_paths(output_dir: Path) -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in output_dir.glob("part-*.md")
+            if path.is_file() and is_transcript_filename(path.name)
+        ),
+        key=lambda path: path.name,
+    )
+
+
 def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
@@ -112,8 +128,7 @@ def _validate_manifest(
         }
         actual_files = {
             path.name
-            for path in output_dir.glob("part-*.md")
-            if path.is_file()
+            for path in transcript_paths(output_dir)
         }
         missing_files = sorted(expected_files - actual_files)
         if missing_files:
@@ -234,7 +249,7 @@ def load_or_migrate_manifest(
     if output_dir.is_dir():
         manifest["parts"] = [
             item
-            for path in sorted(output_dir.glob("part-*.md"))
+            for path in transcript_paths(output_dir)
             if (item := _markdown_metadata(path, bvid)) is not None
         ]
     return manifest

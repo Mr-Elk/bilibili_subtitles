@@ -71,6 +71,21 @@ class OutputManifestTests(unittest.TestCase):
                 [part["part_number"] for part in loaded["parts"]], [1, 2]
             )
 
+    def test_learning_notes_are_user_owned_and_not_manifest_orphans(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            (output_dir / "part-001.md").write_text("caption\n", encoding="utf-8")
+            note = output_dir / "part-001-learning-note-draft.md"
+            note.write_text("private note\n", encoding="utf-8")
+            (output_dir / "manifest.json").write_text(
+                json.dumps(valid_manifest([captioned_part(1)])), encoding="utf-8"
+            )
+
+            loaded = read_manifest(output_dir, expected_bvid=BVID)
+
+            self.assertEqual(loaded["parts"][0]["file"], "part-001.md")
+            self.assertEqual(note.read_text(encoding="utf-8"), "private note\n")
+
     def test_existing_corrupt_manifest_fails_instead_of_migrating_markdown(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)

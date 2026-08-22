@@ -111,6 +111,12 @@ class ReaderTests(unittest.TestCase):
             root = Path(temp_dir)
             write_transcript(root / "part-010.md", "ten", [("00:00:01", "ten")])
             write_transcript(root / "part-002.md", "two", [("00:00:01", "two")])
+            (root / "part-001-learning-note-draft.md").write_text(
+                "# private note\n", encoding="utf-8"
+            )
+            (root / "part-003-other.md").write_text(
+                "# unrelated\n", encoding="utf-8"
+            )
             (root / "index.md").write_text("index\n", encoding="utf-8")
 
             files = transcript_files(root)

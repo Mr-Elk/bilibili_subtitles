@@ -483,6 +483,49 @@ class PowerShellScriptTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["items"][0]["text"], "中文优化结果")
 
+    def test_main_launcher_json_can_be_captured_by_powershell(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir) / "part-001.md"
+            transcript.write_text(
+                "# Pipeline\n\n## Transcript\n\n[00:00:01] 可捕获结果\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["BILIBILI_SUBTITLE_PYTHON"] = sys.executable
+            script = str(PROJECT_ROOT / "bilibili-subtitles.ps1").replace(
+                "'", "''"
+            )
+            target = str(transcript).replace("'", "''")
+            tool_root = str(PROJECT_ROOT).replace("'", "''")
+            command = (
+                f"$captured = @(& '{script}' -Action Search "
+                f"-Target '{target}' -Query '捕获' -Context 0 "
+                f"-Format Json -ToolRoot '{tool_root}'); "
+                "if ($captured.Count -eq 0) { "
+                "throw 'Subtitle JSON was not written to the PowerShell pipeline.' "
+                "}; "
+                "$captured -join ''"
+            )
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["items"][0]["text"], "可捕获结果")
+
     def test_main_launcher_exposes_manifest_status_as_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)

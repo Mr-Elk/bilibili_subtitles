@@ -72,6 +72,7 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8NoBom
 $script:InstalledConfigLoaded = $false
 $script:InstalledConfig = $null
+$script:SubtitleToolExitCode = 1
 
 function Show-Usage {
     @"
@@ -119,7 +120,7 @@ function Write-BoundedLines {
         $rendered = $rendered.Substring(0, $prefixLength) + $marker
     }
     if ($rendered) {
-        [Console]::Out.WriteLine($rendered)
+        Write-Output $rendered
     }
 }
 
@@ -422,14 +423,14 @@ function Invoke-SubtitleTool {
         $selectedOutput = @("Subtitle tool exited with code $toolExitCode.")
     }
     if ($toolExitCode -eq 0 -and -not $isExtraction -and $Format -eq "Json") {
-        [Console]::Out.WriteLine(
+        Write-Output (
             (($selectedOutput | ForEach-Object { [string]$_ }) -join "")
         )
     } else {
         $outputLimit = if ($MaxChars -gt 0) { $MaxChars } else { 10000 }
         Write-BoundedLines -Lines $selectedOutput -Limit $outputLimit
     }
-    return $toolExitCode
+    $script:SubtitleToolExitCode = $toolExitCode
 }
 
 try {
@@ -449,7 +450,8 @@ try {
     if ($Page -gt 0 -and $AllParts) {
         throw "Page and AllParts cannot be used together."
     }
-    exit (Invoke-SubtitleTool)
+    Invoke-SubtitleTool
+    exit $script:SubtitleToolExitCode
 } catch {
     [Console]::Error.WriteLine("Error: $($_.Exception.Message)")
     exit 1

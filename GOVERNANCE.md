@@ -36,6 +36,8 @@ Git 只保存源码、测试、协议、提示模板和治理文档。下列内�
 .\verify.ps1 -RequireClean
 ```
 
+`-StaticOnly` 只用于临时 Git 测试夹具验证文件、凭据和工作树规则。它会跳过 Python、依赖、测试和编译，并只输出 `STATIC-ONLY PASS`；不能作为提交、安装或交付证据。
+
 ## 依赖治理
 
 - `requirements.txt` 表达直接依赖意图；`requirements-lock.txt` 固定 Windows 运行环境的完整解析结果。

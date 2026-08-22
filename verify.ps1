@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Python,
-    [switch]$RequireClean
+    [switch]$RequireClean,
+    [switch]$StaticOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,15 +21,6 @@ function Invoke-Checked {
 }
 
 $toolRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$pythonPath = if ($Python) {
-    [System.IO.Path]::GetFullPath($Python)
-} else {
-    Join-Path $toolRoot ".venv\Scripts\python.exe"
-}
-if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-    throw "Verification Python was not found: $pythonPath"
-}
-
 $requiredFiles = @(
     "GOVERNANCE.md",
     "README.md",
@@ -47,59 +39,70 @@ foreach ($relativePath in $requiredFiles) {
     }
 }
 
-$originalPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH")
-try {
-    [Environment]::SetEnvironmentVariable("PYTHONPATH", $toolRoot)
-    Invoke-Checked -FilePath $pythonPath -Arguments @(
-        "-c",
-        "import sys, bilibili_subtitles, yt_dlp; ok=(3,11) <= sys.version_info[:2] < (3,14); raise SystemExit(0 if ok else 1)"
-    ) -FailureMessage "Python or required imports are not usable"
-    Invoke-Checked -FilePath $pythonPath -Arguments @(
-        "-m", "pip", "check"
-    ) -FailureMessage "Installed dependencies are inconsistent"
-    $lockMismatches = [System.Collections.Generic.List[string]]::new()
-    foreach ($rawLine in Get-Content -LiteralPath (
-        Join-Path $toolRoot "requirements-lock.txt"
-    )) {
-        $line = $rawLine.Trim()
-        if (-not $line -or $line.StartsWith("#")) {
-            continue
+if (-not $StaticOnly) {
+    $pythonPath = if ($Python) {
+        [System.IO.Path]::GetFullPath($Python)
+    } else {
+        Join-Path $toolRoot ".venv\Scripts\python.exe"
+    }
+    if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+        throw "Verification Python was not found: $pythonPath"
+    }
+
+    $originalPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH")
+    try {
+        [Environment]::SetEnvironmentVariable("PYTHONPATH", $toolRoot)
+        Invoke-Checked -FilePath $pythonPath -Arguments @(
+            "-c",
+            "import sys, bilibili_subtitles, yt_dlp; ok=(3,11) <= sys.version_info[:2] < (3,14); raise SystemExit(0 if ok else 1)"
+        ) -FailureMessage "Python or required imports are not usable"
+        Invoke-Checked -FilePath $pythonPath -Arguments @(
+            "-m", "pip", "check"
+        ) -FailureMessage "Installed dependencies are inconsistent"
+        $lockMismatches = [System.Collections.Generic.List[string]]::new()
+        foreach ($rawLine in Get-Content -LiteralPath (
+            Join-Path $toolRoot "requirements-lock.txt"
+        )) {
+            $line = $rawLine.Trim()
+            if (-not $line -or $line.StartsWith("#")) {
+                continue
+            }
+            $parts = $line.Split(@("=="), 2, [System.StringSplitOptions]::None)
+            if ($parts.Count -ne 2) {
+                throw "Unsupported dependency lock entry: $line"
+            }
+            $packageName = [regex]::Replace($parts[0].Trim(), "\[.*\]$", "")
+            $expectedVersion = $parts[1].Trim()
+            $installedVersion = (& $pythonPath -c (
+                "from importlib.metadata import version; import sys; " +
+                "print(version(sys.argv[1]))"
+            ) $packageName).Trim()
+            if ($LASTEXITCODE -ne 0) {
+                throw "Cannot inspect locked dependency: $packageName"
+            }
+            if ($installedVersion -ne $expectedVersion) {
+                [void]$lockMismatches.Add(
+                    "${packageName}: expected $expectedVersion, installed $installedVersion"
+                )
+            }
         }
-        $parts = $line.Split(@("=="), 2, [System.StringSplitOptions]::None)
-        if ($parts.Count -ne 2) {
-            throw "Unsupported dependency lock entry: $line"
-        }
-        $packageName = [regex]::Replace($parts[0].Trim(), "\[.*\]$", "")
-        $expectedVersion = $parts[1].Trim()
-        $installedVersion = (& $pythonPath -c (
-            "from importlib.metadata import version; import sys; " +
-            "print(version(sys.argv[1]))"
-        ) $packageName).Trim()
-        if ($LASTEXITCODE -ne 0) {
-            throw "Cannot inspect locked dependency: $packageName"
-        }
-        if ($installedVersion -ne $expectedVersion) {
-            [void]$lockMismatches.Add(
-                "${packageName}: expected $expectedVersion, installed $installedVersion"
+        if ($lockMismatches.Count -gt 0) {
+            throw (
+                "Installed dependencies do not match requirements-lock.txt: " +
+                ($lockMismatches -join "; ")
             )
         }
+        Invoke-Checked -FilePath $pythonPath -Arguments @(
+            "-m", "unittest", "discover", "-s", (Join-Path $toolRoot "tests"), "-v"
+        ) -FailureMessage "Test suite failed"
+        Invoke-Checked -FilePath $pythonPath -Arguments @(
+            "-m", "compileall", "-q",
+            (Join-Path $toolRoot "bilibili_subtitles"),
+            (Join-Path $toolRoot "tests")
+        ) -FailureMessage "Python compilation failed"
+    } finally {
+        [Environment]::SetEnvironmentVariable("PYTHONPATH", $originalPythonPath)
     }
-    if ($lockMismatches.Count -gt 0) {
-        throw (
-            "Installed dependencies do not match requirements-lock.txt: " +
-            ($lockMismatches -join "; ")
-        )
-    }
-    Invoke-Checked -FilePath $pythonPath -Arguments @(
-        "-m", "unittest", "discover", "-s", (Join-Path $toolRoot "tests"), "-v"
-    ) -FailureMessage "Test suite failed"
-    Invoke-Checked -FilePath $pythonPath -Arguments @(
-        "-m", "compileall", "-q",
-        (Join-Path $toolRoot "bilibili_subtitles"),
-        (Join-Path $toolRoot "tests")
-    ) -FailureMessage "Python compilation failed"
-} finally {
-    [Environment]::SetEnvironmentVariable("PYTHONPATH", $originalPythonPath)
 }
 
 $scriptFiles = @(
@@ -198,4 +201,8 @@ if ($RequireClean) {
     }
 }
 
-Write-Output "[verify] PASS"
+if ($StaticOnly) {
+    Write-Output "[verify] STATIC-ONLY PASS"
+} else {
+    Write-Output "[verify] PASS"
+}

@@ -12,6 +12,113 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def _governance_fixture(self, root: Path) -> None:
+        for name in (
+            ".gitignore",
+            "GOVERNANCE.md",
+            "README.md",
+            "READER_JSON_V1.md",
+            "requirements.txt",
+            "requirements-lock.txt",
+            "setup.ps1",
+            "install.ps1",
+            "bilibili-subtitles.ps1",
+            "extract.ps1",
+            "verify.ps1",
+        ):
+            shutil.copy2(PROJECT_ROOT / name, root / name)
+        for arguments in (
+            ["git", "init", "-b", "main"],
+            ["git", "config", "user.name", "Governance Test"],
+            ["git", "config", "user.email", "governance@example.invalid"],
+            ["git", "add", "."],
+            ["git", "commit", "-m", "fixture"],
+        ):
+            completed = subprocess.run(
+                arguments,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def _run_static_verifier(self, root: Path, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(root / "verify.ps1"),
+                "-StaticOnly",
+                *extra,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def test_static_verifier_distinguishes_static_from_full_and_rejects_dirty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._governance_fixture(root)
+            clean = self._run_static_verifier(root, "-RequireClean")
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            self.assertIn("[verify] STATIC-ONLY PASS", clean.stdout)
+            self.assertNotIn("[verify] PASS", clean.stdout)
+
+            (root / "README.md").write_text("dirty\n", encoding="utf-8")
+            dirty = self._run_static_verifier(root, "-RequireClean")
+
+        self.assertEqual(dirty.returncode, 1)
+        self.assertIn("Working tree is not clean", dirty.stderr)
+
+    def test_static_verifier_rejects_private_artifacts_and_credentials(self):
+        cases = (
+            (
+                Path("output") / "part-001.md",
+                "[00:00:00] private transcript\n",
+                "Private or runtime artifacts are tracked",
+                True,
+            ),
+            (
+                Path("notes.txt"),
+                "Authorization: Bearer abcdefghijklmnop\n",
+                "Possible credentials are present in tracked files",
+                False,
+            ),
+        )
+        for relative_path, content, message, force in cases:
+            with self.subTest(relative_path=str(relative_path)):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    self._governance_fixture(root)
+                    target = root / relative_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+                    add = ["git", "add"]
+                    if force:
+                        add.append("-f")
+                    add.append(str(relative_path))
+                    staged = subprocess.run(
+                        add,
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        check=False,
+                    )
+                    self.assertEqual(staged.returncode, 0, staged.stderr)
+                    completed = self._run_static_verifier(root)
+
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn(message, completed.stderr)
+
     def test_governance_scripts_parse_and_setup_uses_dependency_lock(self):
         for name in (
             "setup.ps1",

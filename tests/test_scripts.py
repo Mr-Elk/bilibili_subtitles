@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,118 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def _run_portable_install(
+        self,
+        install_root: Path,
+        output_root: Path,
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PROJECT_ROOT / "install.ps1"),
+                "-InstallRoot",
+                str(install_root),
+                "-OutputRoot",
+                str(output_root),
+                "-MaxParts",
+                "17",
+                "-NoUserEnvironment",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def test_portable_install_is_verified_without_user_environment_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            install_root = root / "installed"
+            output_root = root / "output"
+
+            completed = self._run_portable_install(install_root, output_root)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            config = json.loads(
+                (install_root / "bili-subtitles.config.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(config["tool_root"], str(PROJECT_ROOT))
+            self.assertEqual(config["output_root"], str(output_root))
+            self.assertEqual(config["max_parts"], 17)
+            for name in ("bili-subtitles.cmd", "bilibili-subtitles.ps1"):
+                source_digest = hashlib.sha256(
+                    (PROJECT_ROOT / name).read_bytes()
+                ).digest()
+                installed_digest = hashlib.sha256(
+                    (install_root / name).read_bytes()
+                ).digest()
+                self.assertEqual(installed_digest, source_digest)
+            self.assertFalse(
+                any(
+                    path.name.startswith(".bili-subtitles.install.")
+                    for path in install_root.iterdir()
+                )
+            )
+            self.assertIn("User environment: unchanged", completed.stdout)
+
+            help_result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(install_root / "bilibili-subtitles.ps1"),
+                    "-ShowHelp",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("Extract captions anonymously", help_result.stdout)
+
+    def test_install_failure_restores_previous_files_and_cleans_transaction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            install_root = root / "installed"
+            install_root.mkdir()
+            output_root = root / "output"
+            previous_script = b"previous governed script"
+            previous_config = b"previous governed config"
+            (install_root / "bilibili-subtitles.ps1").write_bytes(previous_script)
+            (install_root / "bili-subtitles.config.json").write_bytes(
+                previous_config
+            )
+            (install_root / "bili-subtitles.cmd").mkdir()
+
+            completed = self._run_portable_install(install_root, output_root)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Install target is not a file", completed.stderr)
+            self.assertEqual(
+                (install_root / "bilibili-subtitles.ps1").read_bytes(),
+                previous_script,
+            )
+            self.assertEqual(
+                (install_root / "bili-subtitles.config.json").read_bytes(),
+                previous_config,
+            )
+            self.assertTrue((install_root / "bili-subtitles.cmd").is_dir())
+            self.assertFalse(
+                any(
+                    path.name.startswith(".bili-subtitles.install.")
+                    for path in install_root.iterdir()
+                )
+            )
+
     def test_extraction_progress_streams_before_python_finishes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             fake_tool_root = Path(temp_dir) / "fake-tool"

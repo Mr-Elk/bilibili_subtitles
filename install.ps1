@@ -7,11 +7,28 @@ param(
     [string]$OutputRoot,
 
     [ValidateRange(0, 1000)]
-    [int]$MaxParts = 0
+    [int]$MaxParts = 0,
+
+    [switch]$NoUserEnvironment
 )
 
 $ErrorActionPreference = "Stop"
 $userTarget = [EnvironmentVariableTarget]::User
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString(
+            $hasher.ComputeHash($stream)
+        ).Replace("-", "")
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
 
 $toolRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $resolvedInstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
@@ -56,29 +73,13 @@ foreach ($source in @($launcherSource, $scriptSource)) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $resolvedInstallRoot -PathType Container)) {
+$installRootExisted = Test-Path -LiteralPath $resolvedInstallRoot -PathType Container
+if (-not $installRootExisted) {
     $null = New-Item -ItemType Directory -Path $resolvedInstallRoot
 }
 $launcherTarget = Join-Path $resolvedInstallRoot "bili-subtitles.cmd"
 $scriptTarget = Join-Path $resolvedInstallRoot "bilibili-subtitles.ps1"
-Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
-Copy-Item -LiteralPath $scriptSource -Destination $scriptTarget -Force
-
-foreach ($pair in @(
-    @($launcherSource, $launcherTarget),
-    @($scriptSource, $scriptTarget)
-)) {
-    $sourceHash = (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash
-    $targetHash = (Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash
-    if ($sourceHash -ne $targetHash) {
-        throw "Installed launcher verification failed: $($pair[1])"
-    }
-}
-
 $configTarget = Join-Path $resolvedInstallRoot "bili-subtitles.config.json"
-$configTemporary = Join-Path $resolvedInstallRoot (
-    ".bili-subtitles.config.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
-)
 $configData = [ordered]@{
     schema_version = 1
     tool_root = $toolRoot
@@ -87,87 +88,270 @@ $configData = [ordered]@{
 }
 $configJson = $configData | ConvertTo-Json -Compress
 $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-try {
-    [System.IO.File]::WriteAllText($configTemporary, $configJson, $strictUtf8)
-    if (Test-Path -LiteralPath $configTarget -PathType Leaf) {
-        [System.IO.File]::Replace($configTemporary, $configTarget, $null)
-    } else {
-        [System.IO.File]::Move($configTemporary, $configTarget)
+$installNonce = "$PID.$([Guid]::NewGuid().ToString('N'))"
+function New-InstallItem {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Source,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    return [pscustomobject]@{
+        Name = $Name
+        Source = $Source
+        Target = $Target
+        Temporary = Join-Path $resolvedInstallRoot (
+            ".bili-subtitles.install.$installNonce.$Name.tmp"
+        )
+        Backup = Join-Path $resolvedInstallRoot (
+            ".bili-subtitles.install.$installNonce.$Name.bak"
+        )
+        RollbackDiscard = Join-Path $resolvedInstallRoot (
+            ".bili-subtitles.install.$installNonce.$Name.rollback.bak"
+        )
+        HadTarget = $false
     }
-} finally {
-    if (Test-Path -LiteralPath $configTemporary -PathType Leaf) {
-        Remove-Item -LiteralPath $configTemporary -Force
-    }
-}
-$verifiedConfig = (
-    [System.IO.File]::ReadAllText($configTarget, $strictUtf8) |
-        ConvertFrom-Json
-)
-if (
-    [int]$verifiedConfig.schema_version -ne 1 -or
-    [string]$verifiedConfig.tool_root -ne $toolRoot -or
-    [string]$verifiedConfig.output_root -ne $resolvedOutputRoot -or
-    [int]$verifiedConfig.max_parts -ne $effectiveMaxParts
-) {
-    throw "Installed configuration verification failed: $configTarget"
 }
 
-[Environment]::SetEnvironmentVariable(
+# Publish the backward-compatible schema v1 configuration first, then the
+# PowerShell implementation, and switch the CMD entry point last. An existing
+# launcher therefore never starts a new implementation against an old config.
+$installItems = @(
+    (New-InstallItem -Name "config" -Target $configTarget),
+    (New-InstallItem -Name "script" -Source $scriptSource -Target $scriptTarget),
+    (New-InstallItem -Name "launcher" -Source $launcherSource -Target $launcherTarget)
+)
+$publishedItems = [System.Collections.Generic.List[object]]::new()
+$environmentNames = @(
     "BILIBILI_SUBTITLE_TOOL_ROOT",
-    $toolRoot,
-    $userTarget
+    "BILIBILI_SUBTITLE_OUTPUT_ROOT",
+    "BILIBILI_SUBTITLE_MAX_PARTS",
+    "Path"
 )
-if ($OutputRoot) {
-    [Environment]::SetEnvironmentVariable(
-        "BILIBILI_SUBTITLE_OUTPUT_ROOT",
-        $resolvedOutputRoot,
+$userEnvironmentBefore = @{}
+foreach ($name in $environmentNames) {
+    $userEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable(
+        $name,
         $userTarget
     )
 }
-if ($MaxParts -gt 0) {
-    [Environment]::SetEnvironmentVariable(
-        "BILIBILI_SUBTITLE_MAX_PARTS",
-        $MaxParts.ToString(),
-        $userTarget
-    )
-}
+$processPathBefore = $env:Path
+$environmentUpdateStarted = $false
+$installSucceeded = $false
+$preserveRecoveryFiles = $false
 
-$userPath = [Environment]::GetEnvironmentVariable("Path", $userTarget)
-$pathParts = [System.Collections.Generic.List[string]]::new()
-if ($userPath) {
-    foreach ($part in $userPath.Split([System.IO.Path]::PathSeparator)) {
-        if ($part.Trim()) {
-            [void]$pathParts.Add($part.Trim())
-        }
-    }
-}
-$pathExists = $false
-foreach ($part in $pathParts) {
-    try {
-        if ([System.IO.Path]::GetFullPath($part).Equals(
-            $resolvedInstallRoot,
-            [System.StringComparison]::OrdinalIgnoreCase
+try {
+    foreach ($item in $installItems) {
+        foreach ($transientPath in @(
+            $item.Temporary,
+            $item.Backup,
+            $item.RollbackDiscard
         )) {
-            $pathExists = $true
-            break
+            if (Test-Path -LiteralPath $transientPath) {
+                throw "Install transaction path already exists: $transientPath"
+            }
         }
-    } catch {
-        continue
+        if ($item.Source) {
+            Copy-Item -LiteralPath $item.Source -Destination $item.Temporary
+            $sourceHash = Get-FileSha256 -LiteralPath $item.Source
+            $temporaryHash = Get-FileSha256 -LiteralPath $item.Temporary
+            if ($sourceHash -ne $temporaryHash) {
+                throw "Staged launcher verification failed: $($item.Name)"
+            }
+        } else {
+            [System.IO.File]::WriteAllText(
+                $item.Temporary,
+                $configJson,
+                $strictUtf8
+            )
+        }
+    }
+
+    foreach ($item in $installItems) {
+        if (Test-Path -LiteralPath $item.Target -PathType Container) {
+            throw "Install target is not a file: $($item.Target)"
+        }
+        $item.HadTarget = Test-Path -LiteralPath $item.Target -PathType Leaf
+        [void]$publishedItems.Add($item)
+        if ($item.HadTarget) {
+            [System.IO.File]::Replace(
+                $item.Temporary,
+                $item.Target,
+                $item.Backup
+            )
+        } else {
+            [System.IO.File]::Move($item.Temporary, $item.Target)
+        }
+    }
+
+    foreach ($pair in @(
+        @($launcherSource, $launcherTarget),
+        @($scriptSource, $scriptTarget)
+    )) {
+        $sourceHash = Get-FileSha256 -LiteralPath $pair[0]
+        $targetHash = Get-FileSha256 -LiteralPath $pair[1]
+        if ($sourceHash -ne $targetHash) {
+            throw "Installed launcher verification failed: $($pair[1])"
+        }
+    }
+
+    $verifiedConfig = (
+        [System.IO.File]::ReadAllText($configTarget, $strictUtf8) |
+            ConvertFrom-Json
+    )
+    if (
+        [int]$verifiedConfig.schema_version -ne 1 -or
+        [string]$verifiedConfig.tool_root -ne $toolRoot -or
+        [string]$verifiedConfig.output_root -ne $resolvedOutputRoot -or
+        [int]$verifiedConfig.max_parts -ne $effectiveMaxParts
+    ) {
+        throw "Installed configuration verification failed: $configTarget"
+    }
+
+    if (-not $NoUserEnvironment) {
+        $environmentUpdateStarted = $true
+        [Environment]::SetEnvironmentVariable(
+            "BILIBILI_SUBTITLE_TOOL_ROOT",
+            $toolRoot,
+            $userTarget
+        )
+        if ($OutputRoot) {
+            [Environment]::SetEnvironmentVariable(
+                "BILIBILI_SUBTITLE_OUTPUT_ROOT",
+                $resolvedOutputRoot,
+                $userTarget
+            )
+        }
+        if ($MaxParts -gt 0) {
+            [Environment]::SetEnvironmentVariable(
+                "BILIBILI_SUBTITLE_MAX_PARTS",
+                $MaxParts.ToString(),
+                $userTarget
+            )
+        }
+
+        $userPath = [Environment]::GetEnvironmentVariable("Path", $userTarget)
+        $pathParts = [System.Collections.Generic.List[string]]::new()
+        if ($userPath) {
+            foreach ($part in $userPath.Split([System.IO.Path]::PathSeparator)) {
+                if ($part.Trim()) {
+                    [void]$pathParts.Add($part.Trim())
+                }
+            }
+        }
+        $pathExists = $false
+        foreach ($part in $pathParts) {
+            try {
+                if ([System.IO.Path]::GetFullPath($part).Equals(
+                    $resolvedInstallRoot,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                    $pathExists = $true
+                    break
+                }
+            } catch {
+                continue
+            }
+        }
+        if (-not $pathExists) {
+            [void]$pathParts.Add($resolvedInstallRoot)
+            [Environment]::SetEnvironmentVariable(
+                "Path",
+                ($pathParts.ToArray() -join [System.IO.Path]::PathSeparator),
+                $userTarget
+            )
+        }
+
+        if (-not (($env:Path.Split([System.IO.Path]::PathSeparator)) -contains $resolvedInstallRoot)) {
+            $env:Path = (
+                $resolvedInstallRoot +
+                [System.IO.Path]::PathSeparator +
+                $env:Path
+            )
+        }
+    }
+    $installSucceeded = $true
+} catch {
+    $installFailure = $_
+    $rollbackFailures = [System.Collections.Generic.List[string]]::new()
+
+    if ($environmentUpdateStarted) {
+        foreach ($name in $environmentNames) {
+            try {
+                [Environment]::SetEnvironmentVariable(
+                    $name,
+                    $userEnvironmentBefore[$name],
+                    $userTarget
+                )
+            } catch {
+                [void]$rollbackFailures.Add("user environment $name")
+            }
+        }
+        $env:Path = $processPathBefore
+    }
+
+    for ($index = $publishedItems.Count - 1; $index -ge 0; $index--) {
+        $item = $publishedItems[$index]
+        try {
+            if ($item.HadTarget) {
+                if (Test-Path -LiteralPath $item.Backup -PathType Leaf) {
+                    if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+                        [System.IO.File]::Replace(
+                            $item.Backup,
+                            $item.Target,
+                            $item.RollbackDiscard
+                        )
+                    } else {
+                        [System.IO.File]::Move($item.Backup, $item.Target)
+                    }
+                }
+            } elseif (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+                Remove-Item -LiteralPath $item.Target -Force
+            }
+        } catch {
+            [void]$rollbackFailures.Add($item.Target)
+        }
+    }
+
+    if ($rollbackFailures.Count -gt 0) {
+        $preserveRecoveryFiles = $true
+        throw (
+            "Installation failed and rollback needs manual recovery for: " +
+            ($rollbackFailures -join ", ") +
+            ". Original failure: " +
+            $installFailure.Exception.Message
+        )
+    }
+    throw $installFailure
+} finally {
+    foreach ($item in $installItems) {
+        if (Test-Path -LiteralPath $item.Temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $item.Temporary -Force
+        }
+        if (
+            -not $preserveRecoveryFiles -and
+            (Test-Path -LiteralPath $item.Backup -PathType Leaf)
+        ) {
+            Remove-Item -LiteralPath $item.Backup -Force
+        }
+        if (
+            -not $preserveRecoveryFiles -and
+            (Test-Path -LiteralPath $item.RollbackDiscard -PathType Leaf)
+        ) {
+            Remove-Item -LiteralPath $item.RollbackDiscard -Force
+        }
+    }
+    if (
+        -not $installSucceeded -and
+        -not $installRootExisted -and
+        (Test-Path -LiteralPath $resolvedInstallRoot -PathType Container) -and
+        -not (Get-ChildItem -LiteralPath $resolvedInstallRoot -Force | Select-Object -First 1)
+    ) {
+        Remove-Item -LiteralPath $resolvedInstallRoot -Force
     }
 }
-if (-not $pathExists) {
-    [void]$pathParts.Add($resolvedInstallRoot)
-    [Environment]::SetEnvironmentVariable(
-        "Path",
-        ($pathParts.ToArray() -join [System.IO.Path]::PathSeparator),
-        $userTarget
-    )
-}
 
-if (-not (($env:Path.Split([System.IO.Path]::PathSeparator)) -contains $resolvedInstallRoot)) {
-    $env:Path = $resolvedInstallRoot + [System.IO.Path]::PathSeparator + $env:Path
-}
-
+if (-not $NoUserEnvironment) {
 try {
     if (-not ("BilibiliSubtitleEnvironmentBroadcast" -as [type])) {
         Add-Type @"
@@ -194,10 +378,16 @@ public static class BilibiliSubtitleEnvironmentBroadcast {
 } catch {
     Write-Warning "Installed successfully, but other open terminals may need to be restarted."
 }
+}
 
 Write-Output "Installed command: $launcherTarget"
 Write-Output "Installed config: $configTarget"
 Write-Output "Canonical tool: $toolRoot"
 Write-Output "Default output: $resolvedOutputRoot"
 Write-Output "Large-anthology threshold: $effectiveMaxParts parts"
-Write-Output "Run now or in any terminal: bili-subtitles --help"
+if ($NoUserEnvironment) {
+    Write-Output "User environment: unchanged (-NoUserEnvironment)"
+    Write-Output "Run directly: `"$launcherTarget`" --help"
+} else {
+    Write-Output "Run now or in any terminal: bili-subtitles --help"
+}

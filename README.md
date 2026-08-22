@@ -29,7 +29,15 @@
 .\setup.ps1 -Repair -Python "C:\path\to\python.exe"
 ```
 
-修复会先保留带时间戳的旧环境，失败时自动还原。`install.ps1` 把轻量启动器安装到用户目录、完整保留用户 PATH，并让全局命令始终指向本项目这份源码。安装目录同时生成 `bili-subtitles.config.json`，所以安装完成后无需重启终端即可使用。
+修复会先保留带时间戳的旧环境，失败时自动还原。`install.ps1` 会先在安装目录暂存并校验启动脚本与配置，最后才切换 CMD 入口；任一步失败都会恢复原安装并清理事务文件。它把轻量启动器安装到用户目录、完整保留用户 PATH，并让全局命令始终指向本项目这份源码。安装目录同时生成 `bili-subtitles.config.json`，所以安装完成后无需重启终端即可使用。
+
+需要做便携安装或隔离验证、且不希望修改用户 PATH 和环境变量时使用：
+
+```powershell
+.\install.ps1 -InstallRoot "D:\tools\bili-subtitles" -OutputRoot "D:\subtitles" -NoUserEnvironment
+```
+
+此模式仍会生成并校验完整安装文件，但只通过安装目录中的 `bili-subtitles.cmd` 直接运行。
 
 `requirements.txt` 记录直接依赖，`requirements-lock.txt` 固定实际安装的完整依赖集合。更新依赖必须显式更新锁文件并重新执行完整验证，不会在安装时自动追随最新版。
 

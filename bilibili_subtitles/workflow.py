@@ -17,6 +17,7 @@ from .output_manifest import (
     upsert_part,
     write_manifest,
 )
+from .progress import ProgressReporter, emit_progress
 
 
 class NoSubtitlesError(RuntimeError):
@@ -33,6 +34,10 @@ class ConcurrentExtractionError(RuntimeError):
 
 class PartSelectionRequiredError(ValueError):
     """Raised when a collection needs an explicit page or all-parts choice."""
+
+
+class MetadataFetchError(RuntimeError):
+    """Raised when the governed metadata and caption lookup stage fails."""
 
 
 @dataclass(frozen=True)
@@ -187,6 +192,7 @@ def extract_to_markdown(
     page: int | None = None,
     all_parts: bool = False,
     max_parts: int = 20,
+    progress: ProgressReporter | None = None,
 ) -> ExtractionResult:
     parsed_url = parse_bv_url(raw_url)
     if page is not None and page < 1:
@@ -212,6 +218,7 @@ def extract_to_markdown(
             selected_page=selected_page,
             all_parts=all_parts,
             max_parts=max_parts,
+            progress=progress,
         )
 
 
@@ -224,18 +231,33 @@ def _extract_to_markdown_locked(
     selected_page: int | None,
     all_parts: bool,
     max_parts: int,
+    progress: ProgressReporter | None,
 ) -> ExtractionResult:
     output_dir = output_root / parsed_url.bvid
     _recover_output(output_root, output_dir, parsed_url.bvid)
     request_url = parsed_url.canonical_url
     if selected_page is not None:
         request_url += f"?p={selected_page}"
-    info = fetch_info(request_url)
+    emit_progress(progress, "metadata", "Fetching Bilibili metadata")
+    try:
+        info = fetch_info(request_url)
+    except KeyboardInterrupt:
+        raise
+    except Exception as error:
+        raise MetadataFetchError(
+            f"Bilibili metadata and caption lookup failed: {error}"
+        ) from error
     entries = _select_entries(
         _logical_entries(info, parsed_url.bvid),
         selected_page=selected_page,
         all_parts=all_parts,
         max_parts=max_parts,
+    )
+    emit_progress(
+        progress,
+        "metadata",
+        f"Metadata ready for {len(entries)} selected part(s)",
+        total=len(entries),
     )
     staging_dir = Path(
         tempfile.mkdtemp(prefix=f".{parsed_url.bvid}-", dir=output_root)
@@ -271,7 +293,15 @@ def _extract_to_markdown_locked(
 
         success_count = 0
         no_subtitle_count = 0
-        for part_number, entry in entries:
+        for current_part, (part_number, entry) in enumerate(entries, start=1):
+            emit_progress(
+                progress,
+                "part",
+                "Preparing caption output",
+                current=current_part,
+                total=len(entries),
+                part_number=part_number,
+            )
             title = entry.get("title") or f"Part {part_number}"
             source_url = entry.get("webpage_url") or (
                 f"{parsed_url.canonical_url}?p={part_number}"
@@ -305,6 +335,14 @@ def _extract_to_markdown_locked(
                         "extraction_method": None,
                     },
                 )
+                emit_progress(
+                    progress,
+                    "part",
+                    "No usable captions found",
+                    current=current_part,
+                    total=len(entries),
+                    part_number=part_number,
+                )
                 continue
 
             filename = f"part-{part_number:03d}.md"
@@ -334,6 +372,14 @@ def _extract_to_markdown_locked(
                     "extraction_method": "existing_bilibili_captions",
                 },
             )
+            emit_progress(
+                progress,
+                "part",
+                "Caption output prepared",
+                current=current_part,
+                total=len(entries),
+                part_number=part_number,
+            )
 
         if success_count == 0:
             raise NoSubtitlesError(
@@ -343,21 +389,23 @@ def _extract_to_markdown_locked(
         manifest["updated_at"] = extracted_at
         write_manifest(staging_dir, manifest)
         (staging_dir / "index.md").write_text(render_index(manifest), encoding="utf-8")
-    except Exception:
+    except BaseException:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
     backup_dir = output_root / f".{parsed_url.bvid}-backup-{uuid4().hex}"
+    emit_progress(progress, "publish", "Publishing atomic subtitle output")
     try:
         if output_dir.exists():
             output_dir.rename(backup_dir)
         staging_dir.rename(output_dir)
-    except Exception:
+    except BaseException:
         if backup_dir.exists() and not output_dir.exists():
             backup_dir.rename(output_dir)
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
     shutil.rmtree(backup_dir, ignore_errors=True)
+    emit_progress(progress, "publish", "Subtitle output published")
 
     return ExtractionResult(
         success_count=success_count,

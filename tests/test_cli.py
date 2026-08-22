@@ -184,7 +184,7 @@ class CliTests(unittest.TestCase):
         }
         calls = []
 
-        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+        def fake_fetch(url, *, use_browser_cookies, playlist_end, warn, progress):
             calls.append((url, use_browser_cookies, playlist_end))
             return info
 
@@ -222,7 +222,7 @@ class CliTests(unittest.TestCase):
         }
         calls = []
 
-        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+        def fake_fetch(url, *, use_browser_cookies, playlist_end, warn, progress):
             calls.append((url, use_browser_cookies, playlist_end))
             return info
 
@@ -262,7 +262,7 @@ class CliTests(unittest.TestCase):
         }
         calls = []
 
-        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+        def fake_fetch(url, *, use_browser_cookies, playlist_end, warn, progress):
             calls.append((url, use_browser_cookies, playlist_end))
             return info
 
@@ -339,7 +339,39 @@ class CliTests(unittest.TestCase):
             self.assertTrue((expected_output / "part-001.md").is_file())
             self.assertIn("Extracted 1 part(s)", stdout.getvalue())
             self.assertIn(str(expected_output), stdout.getvalue())
-            self.assertEqual(stderr.getvalue(), "")
+            self.assertIn("Fetching Bilibili metadata", stderr.getvalue())
+            self.assertIn("[1/1] P1 Caption output prepared", stderr.getvalue())
+            self.assertIn("Subtitle output published", stderr.getvalue())
+
+    def test_no_progress_keeps_successful_extraction_stderr_empty(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Quiet extraction",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                    }
+                ]
+            },
+        }
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exit_code = main(
+                [
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    "--output-root",
+                    temp_dir,
+                    "--no-progress",
+                ],
+                info_fetcher=lambda _url: info,
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_rejects_unsupported_url_before_calling_yt_dlp(self):
         fetch_called = False
@@ -432,7 +464,32 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertEqual(stderr.getvalue(), "Error: network unavailable\n")
+        self.assertIn("Fetching Bilibili metadata", stderr.getvalue())
+        self.assertIn("metadata and caption lookup failed", stderr.getvalue())
+        self.assertIn("network unavailable", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_keyboard_interrupt_returns_cancelled_exit_code(self):
+        stderr = io.StringIO()
+
+        def interrupted_fetch(_url):
+            raise KeyboardInterrupt()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exit_code = main(
+                [
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    "--output-root",
+                    temp_dir,
+                ],
+                info_fetcher=interrupted_fetch,
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("Cancelled", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":

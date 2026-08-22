@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,57 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def test_extraction_progress_streams_before_python_finishes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_tool_root = Path(temp_dir) / "fake-tool"
+            package_dir = fake_tool_root / "bilibili_subtitles"
+            package_dir.mkdir(parents=True)
+            (package_dir / "__init__.py").write_text("", encoding="utf-8")
+            (package_dir / "__main__.py").write_text(
+                "import sys\n"
+                "import time\n"
+                "print('[progress 0.0s] fake extraction started', "
+                "file=sys.stderr, flush=True)\n"
+                "time.sleep(2)\n"
+                "print('Extracted 1 part(s); 0 part(s) had no captions.', flush=True)\n"
+                "print('Output: fake-output', flush=True)\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["BILIBILI_SUBTITLE_PYTHON"] = sys.executable
+            environment["BILIBILI_SUBTITLE_MAX_PARTS"] = "20"
+            process = subprocess.Popen(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(PROJECT_ROOT / "bilibili-subtitles.ps1"),
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    "-ToolRoot",
+                    str(fake_tool_root),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=environment,
+            )
+            self.assertIsNotNone(process.stderr)
+            first_line = process.stderr.readline()
+            self.assertIn("fallback Python runtime", first_line)
+            progress_wait_started = time.monotonic()
+            progress_line = process.stderr.readline()
+            progress_delay = time.monotonic() - progress_wait_started
+            self.assertIn("fake extraction started", progress_line)
+            self.assertLess(progress_delay, 1.5)
+            self.assertIsNone(process.poll(), "progress arrived only after child exit")
+            stdout, remaining_stderr = process.communicate(timeout=10)
+
+        self.assertEqual(process.returncode, 0, remaining_stderr)
+        self.assertIn("Extracted 1 part(s)", stdout)
+
     def _governance_fixture(self, root: Path) -> None:
         for name in (
             ".gitignore",
@@ -156,6 +208,12 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertIn("diff --cached --check", verify_text)
         self.assertIn("Installed dependencies do not match", verify_text)
         self.assertIn('"Status", "Inventory"', launcher_text)
+        self.assertIn('$arguments += "--no-progress"', launcher_text)
+        self.assertNotIn(
+            "$capturedOutput = @(& $runtime.Python @toolArguments 2>&1)\n"
+            "        $toolExitCode",
+            launcher_text,
+        )
 
     def test_governance_contract_keeps_private_outputs_untracked(self):
         governance = (PROJECT_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")

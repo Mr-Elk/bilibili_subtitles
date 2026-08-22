@@ -53,9 +53,14 @@ bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx" -MaxParts 30
 
 # 仅在确实需要登录态字幕时启用
 bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx" -UseBrowserCookies
+
+# 自动化场景可关闭 stderr 上的实时进度；最终结果仍写入 stdout
+bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx?p=3" -NoProgress
 ```
 
 输出目录中每个 BV 号对应一个文件夹：`index.md` 是给人看的分 P 索引，`manifest.json` 是供后续工具读取的稳定结构化清单，`part-001.md` 等文件保存带 `[HH:MM:SS]` 时间戳的字幕。
+
+提取时会在错误输出中实时显示元数据、字幕轨、分 P 准备和原子发布阶段，以及从命令开始计算的耗时；进度不包含字幕正文、Cookie 或授权信息。最终计数与输出目录仍写入标准输出。按 `Ctrl+C` 取消会清理临时目录；如果中断发生在发布期间，会恢复上一次结果并返回取消状态。
 
 完整提取成功后会整体替换这个 BV 的旧结果；单 P 提取则原子更新该 P，并保留同目录里的其他分 P。旧版目录第一次执行单 P 更新时，会自动从已有 Markdown 迁移出清单。任何中途失败都会保留上一次成功结果，同一 BV 的并发提取会被拒绝。
 
@@ -87,6 +92,7 @@ bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键
 
 - `bilibili_subtitles/`：URL 校验、字幕获取、分 P 选择、Markdown 写入与回滚。
 - `bilibili_subtitles/output_manifest.py`：结构化结果协议、旧输出迁移与单 P 合并。
+- `bilibili_subtitles/progress.py`：无敏感正文的结构化进度事件与终端格式。
 - `bilibili_subtitles/reader.py`：Status、Inventory、Map、Search、Slice、文本/JSON 渲染和输出限长；可以独立单测和被后续工具复用。
 - `bilibili-subtitles.ps1`：统一入口，只负责运行环境定位、兼容参数和结果转发。
 - `bili-subtitles.cmd`：全局命令启动器。
@@ -108,5 +114,6 @@ bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键
 - 环境缺失或损坏：运行 `.\setup.ps1 -Repair`。
 - 匿名访问找不到字幕：确认网页本身确实提供字幕；必要时再显式使用 `-UseBrowserCookies`。
 - Chrome Cookie 无法读取：关闭占用 Cookie 数据库的 Chrome 后重试。Windows/Chromium 的 DPAPI 解密问题可能仍使登录字幕不可用；不要把完整 Cookie 提交到仓库或第三方服务。
+- 提取长时间停留在某一阶段：根据进度中的分 P 和阶段定位；公开接口请求单次最多等待 30 秒。当前不自动重试未知失败，避免把一次等待静默放大为多次等待。
 
 字幕文件仅用于你有权访问和使用的本地学习材料。引用内容前应回看原视频，并遵守平台条款与相关权利限制。

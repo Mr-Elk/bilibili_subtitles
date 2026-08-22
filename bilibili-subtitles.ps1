@@ -55,6 +55,8 @@ param(
 
     [switch]$AllParts,
 
+    [switch]$NoProgress,
+
     [ValidateRange(0, 1000)]
     [int]$MaxParts = 0,
 
@@ -81,6 +83,7 @@ Extract:
   bili-subtitles <BV URL> -Page 3             Extract only part 3
   bili-subtitles <BV URL> -AllParts           Confirm extraction of a large anthology
   bili-subtitles <BV URL> -UseBrowserCookies  Opt in to Chrome login state
+  bili-subtitles <BV URL> -NoProgress          Disable live progress messages
 
 Read local captions with bounded output:
   bili-subtitles -Action Status    -Target <BV-output-directory>
@@ -320,6 +323,9 @@ function New-ToolArguments {
         } else {
             $arguments += "--no-browser-cookies"
         }
+        if ($NoProgress) {
+            $arguments += "--no-progress"
+        }
         return $arguments
     }
 
@@ -356,12 +362,27 @@ function Invoke-SubtitleTool {
     )
     $originalErrorActionPreference = $ErrorActionPreference
     $previousLocation = Get-Location
+    $isFallbackRuntime = -not $runtime.Python.Equals(
+        $runtime.PreferredPython,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    if ($isFallbackRuntime -and $isExtraction) {
+        [Console]::Error.WriteLine(
+            "Warning: using fallback Python runtime: $($runtime.Python)"
+        )
+    }
     try {
         [Environment]::SetEnvironmentVariable("PYTHONPATH", $runtime.PythonPath)
         [Environment]::SetEnvironmentVariable("PYTHONIOENCODING", "utf-8")
         Set-Location -LiteralPath $resolvedToolRoot
         $ErrorActionPreference = "Continue"
-        $capturedOutput = @(& $runtime.Python @toolArguments 2>&1)
+        if ($isExtraction) {
+            # Keep stdout bounded for the final summary, but let stderr flow live so
+            # progress, warnings, and cancellation messages are immediately visible.
+            $capturedOutput = @(& $runtime.Python @toolArguments)
+        } else {
+            $capturedOutput = @(& $runtime.Python @toolArguments 2>&1)
+        }
         $toolExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $originalErrorActionPreference
@@ -374,12 +395,9 @@ function Invoke-SubtitleTool {
     }
     $capturedOutput = @($capturedOutput | ForEach-Object { $_.ToString() })
 
-    if (-not $runtime.Python.Equals(
-        $runtime.PreferredPython,
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
+    if ($isFallbackRuntime -and -not $isExtraction) {
         $runtimeWarning = "Warning: using fallback Python runtime: $($runtime.Python)"
-        if (-not $isExtraction -and $Format -eq "Json") {
+        if ($Format -eq "Json") {
             [Console]::Error.WriteLine($runtimeWarning)
         } else {
             $capturedOutput = @($runtimeWarning) + $capturedOutput

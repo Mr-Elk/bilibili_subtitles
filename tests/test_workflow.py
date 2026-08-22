@@ -40,6 +40,54 @@ ConcurrentExtractionError = getattr(
 
 
 class ExtractToMarkdownTests(unittest.TestCase):
+    def test_metadata_failure_has_stage_context_and_preserves_cause(self):
+        def failing_fetch(_url):
+            raise RuntimeError("network unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                workflow.MetadataFetchError,
+                "metadata and caption lookup failed",
+            ) as raised:
+                extract_to_markdown(
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    output_root=Path(temp_dir),
+                    fetch_info=failing_fetch,
+                    extracted_at="2026-08-22T12:00:00+08:00",
+                )
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+
+    def test_progress_events_cover_metadata_parts_and_atomic_publish(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Progress video",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                    }
+                ]
+            },
+        }
+        events = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De",
+                output_root=Path(temp_dir),
+                fetch_info=lambda _url: info,
+                extracted_at="2026-08-22T12:00:00+08:00",
+                progress=events.append,
+            )
+
+        self.assertEqual(events[0].message, "Fetching Bilibili metadata")
+        self.assertEqual(events[-1].message, "Subtitle output published")
+        part_events = [event for event in events if event.phase == "part"]
+        self.assertEqual(part_events[-1].part_number, 1)
+        self.assertEqual((part_events[-1].current, part_events[-1].total), (1, 1))
+
     def test_successful_rerun_replaces_stale_files(self):
         info = {
             "_type": "video",
@@ -124,6 +172,93 @@ class ExtractToMarkdownTests(unittest.TestCase):
                 if path.name.startswith(".BV1Ab411C7De-")
             ]
             self.assertEqual(leftovers, [])
+
+    def test_keyboard_interrupt_restores_previous_output_during_publish(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Captioned video",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\nnew\n",
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            output_dir = output_root / "BV1Ab411C7De"
+            output_dir.mkdir()
+            (output_dir / "index.md").write_text("previous index\n", encoding="utf-8")
+            real_rename = Path.rename
+
+            def interrupt_staging_publish(path, target):
+                if (
+                    path.name.startswith(".BV1Ab411C7De-")
+                    and "-backup-" not in path.name
+                    and target == output_dir
+                ):
+                    raise KeyboardInterrupt()
+                return real_rename(path, target)
+
+            with patch.object(Path, "rename", interrupt_staging_publish):
+                with self.assertRaises(KeyboardInterrupt):
+                    extract_to_markdown(
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        output_root=output_root,
+                        fetch_info=lambda _url: info,
+                        extracted_at="2026-08-22T12:00:00+08:00",
+                    )
+
+            self.assertEqual(
+                (output_dir / "index.md").read_text(encoding="utf-8"),
+                "previous index\n",
+            )
+            self.assertFalse(
+                any(
+                    path.name.startswith(".BV1Ab411C7De-")
+                    for path in output_root.iterdir()
+                )
+            )
+
+    def test_keyboard_interrupt_cleans_staging_before_publish(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Captioned video",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\nnew\n",
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            output_dir = output_root / "BV1Ab411C7De"
+            output_dir.mkdir()
+            (output_dir / "index.md").write_text("previous index\n", encoding="utf-8")
+
+            with patch.object(workflow, "write_manifest", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    extract_to_markdown(
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        output_root=output_root,
+                        fetch_info=lambda _url: info,
+                        extracted_at="2026-08-22T12:00:00+08:00",
+                    )
+
+            self.assertEqual(
+                (output_dir / "index.md").read_text(encoding="utf-8"),
+                "previous index\n",
+            )
+            self.assertFalse(
+                any(path.is_dir() for path in output_root.glob(".BV1Ab411C7De-*"))
+            )
 
     def test_rejects_a_concurrent_run_for_the_same_video(self):
         first_fetch_started = threading.Event()

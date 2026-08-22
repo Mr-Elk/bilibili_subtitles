@@ -74,6 +74,40 @@ class BilibiliJsonToSrtTests(unittest.TestCase):
 
 
 class PublicRequestValidationTests(unittest.TestCase):
+    def test_http_and_timeout_failures_are_typed(self):
+        failures = (
+            (
+                yt_dlp_adapter.HTTPError(
+                    "https://api.bilibili.com/example",
+                    429,
+                    "rate limited",
+                    {},
+                    None,
+                ),
+                yt_dlp_adapter.PublicCaptionHttpError,
+                "HTTP 429",
+            ),
+            (
+                TimeoutError("slow"),
+                yt_dlp_adapter.PublicCaptionTimeoutError,
+                "timed out",
+            ),
+        )
+        for failure, expected_type, message in failures:
+            with self.subTest(expected_type=expected_type.__name__):
+                class FailingOpener:
+                    def open(self, _request, *, timeout):
+                        self.timeout = timeout
+                        raise failure
+
+                opener = FailingOpener()
+                with patch.object(yt_dlp_adapter, "build_opener", return_value=opener):
+                    with self.assertRaisesRegex(expected_type, message):
+                        yt_dlp_adapter._download_public_json(
+                            "https://api.bilibili.com/example"
+                        )
+                self.assertEqual(opener.timeout, 30)
+
     def test_public_json_download_has_a_hard_body_size_limit(self):
         class FakeResponse(io.BytesIO):
             headers = {}
@@ -201,6 +235,34 @@ class BoundedBilibiliExtractorTests(unittest.TestCase):
 
 
 class PublicCaptionFallbackTests(unittest.TestCase):
+    def test_timeout_error_identifies_the_affected_part_and_stage(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Timeout video",
+            "subtitles": {},
+        }
+
+        def fetch_json(url):
+            if "/x/web-interface/view" in url:
+                return {
+                    "code": 0,
+                    "data": {
+                        "aid": 123,
+                        "pages": [{"page": 1, "cid": 11}],
+                    },
+                }
+            raise TimeoutError("slow")
+
+        with self.assertRaisesRegex(
+            yt_dlp_adapter.PublicCaptionTimeoutError,
+            "Part 1 subtitle metadata",
+        ):
+            yt_dlp_adapter._add_public_subtitles(
+                "https://www.bilibili.com/video/BV1Ab411C7De",
+                info,
+                fetch_json,
+            )
+
     def test_does_not_replace_usable_english_with_public_english(self):
         existing_srt = "1\n00:00:01,000 --> 00:00:02,000\nExisting English\n"
         info = {
@@ -339,6 +401,46 @@ class PublicCaptionFallbackTests(unittest.TestCase):
 
 
 class FetchInfoTests(unittest.TestCase):
+    def test_existing_caption_progress_is_structured_and_yt_dlp_is_quiet(self):
+        received_options = []
+        events = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                received_options.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+            def extract_info(self, _url, *, download):
+                return {
+                    "id": "BV1Ab411C7De",
+                    "title": "Captioned video",
+                    "subtitles": {
+                        "ai-zh": [
+                            {
+                                "ext": "srt",
+                                "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                            }
+                        ]
+                    },
+                }
+
+        fetch_info(
+            "https://www.bilibili.com/video/BV1Ab411C7De",
+            ydl_factory=FakeYoutubeDL,
+            public_json_fetcher=lambda _url: self.fail("fallback must be skipped"),
+            progress=events.append,
+        )
+
+        self.assertTrue(received_options[0]["quiet"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].phase, "caption")
+        self.assertEqual(events[0].part_number, 1)
+
     def test_page_query_limits_yt_dlp_to_the_selected_part(self):
         received_options = []
 

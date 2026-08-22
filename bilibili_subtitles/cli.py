@@ -2,8 +2,10 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import sys
+import time
 
 from .core import InvalidBilibiliUrl
+from .progress import format_progress
 from .reader import ReaderInputError, read_transcripts
 from .workflow import (
     NoSubtitlesError,
@@ -21,6 +23,7 @@ def main(
     *,
     info_fetcher=None,
     clock=None,
+    monotonic=None,
     stdout=None,
     stderr=None,
 ) -> int:
@@ -99,6 +102,11 @@ def main(
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable extraction progress messages on stderr",
+    )
     args = parser.parse_args(argv)
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -139,11 +147,28 @@ def main(
     if args.max_parts < 1:
         print("Error: --max-parts must be a positive integer.", file=stderr)
         return 2
+    monotonic = monotonic or time.monotonic
+    progress_started = monotonic()
+
+    def report_progress(event) -> None:
+        if args.no_progress:
+            return
+        print(
+            format_progress(event, elapsed_seconds=monotonic() - progress_started),
+            file=stderr,
+            flush=True,
+        )
+
+    def report_warning(message: str) -> None:
+        print(f"Warning: {message}", file=stderr, flush=True)
+
     if info_fetcher is None:
         info_fetcher = lambda url: fetch_info(
             url,
             use_browser_cookies=args.use_browser_cookies,
             playlist_end=None if args.all_parts else args.max_parts + 1,
+            warn=report_warning,
+            progress=report_progress,
         )
     clock = clock or (lambda: datetime.now().astimezone())
 
@@ -156,7 +181,11 @@ def main(
             page=args.page,
             all_parts=args.all_parts,
             max_parts=args.max_parts,
+            progress=report_progress,
         )
+    except KeyboardInterrupt:
+        print("Cancelled: subtitle extraction was interrupted.", file=stderr, flush=True)
+        return 130
     except (InvalidBilibiliUrl, PartSelectionRequiredError) as error:
         print(f"Error: {error}", file=stderr)
         return 2

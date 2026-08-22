@@ -1,10 +1,13 @@
 import json
 import re
+import socket
 import sys
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .core import parse_bv_url, parse_srt
+from .progress import ProgressReporter, emit_progress
 
 
 _API_HOSTS = frozenset({"api.bilibili.com"})
@@ -17,6 +20,18 @@ MAX_PUBLIC_CAPTION_CUES = 100_000
 
 class PublicCaptionLookupError(RuntimeError):
     """Raised when Bilibili's public caption data cannot be verified."""
+
+
+class PublicCaptionNetworkError(PublicCaptionLookupError):
+    """Raised when a bounded public caption request fails at the network layer."""
+
+
+class PublicCaptionTimeoutError(PublicCaptionNetworkError):
+    """Raised when a bounded public caption request times out."""
+
+
+class PublicCaptionHttpError(PublicCaptionNetworkError):
+    """Raised when a bounded public caption request returns an HTTP error."""
 
 
 def _validate_https_url(raw_url: str, allowed_hosts) -> str:
@@ -105,27 +120,53 @@ def _download_public_json(url: str) -> dict:
         },
     )
     opener = build_opener(_BoundaryRedirectHandler(allowed_hosts))
-    with opener.open(request, timeout=30) as response:
-        content_length = response.headers.get("Content-Length")
-        if content_length is not None:
-            try:
-                if int(content_length) > MAX_PUBLIC_JSON_BYTES:
-                    raise PublicCaptionLookupError(
-                        "Public caption response exceeds the size limit."
-                    )
-            except ValueError:
-                pass
-        payload = response.read(MAX_PUBLIC_JSON_BYTES + 1)
-        if len(payload) > MAX_PUBLIC_JSON_BYTES:
-            raise PublicCaptionLookupError(
-                "Public caption response exceeds the size limit."
-            )
-        try:
-            return json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PublicCaptionLookupError(
-                "Public caption response is not valid UTF-8 JSON."
+    try:
+        with opener.open(request, timeout=30) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > MAX_PUBLIC_JSON_BYTES:
+                        raise PublicCaptionLookupError(
+                            "Public caption response exceeds the size limit."
+                        )
+                except ValueError:
+                    pass
+            payload = response.read(MAX_PUBLIC_JSON_BYTES + 1)
+    except HTTPError as error:
+        raise PublicCaptionHttpError(
+            f"Public caption request returned HTTP {error.code}."
+        ) from error
+    except (TimeoutError, socket.timeout) as error:
+        raise PublicCaptionTimeoutError(
+            "Public caption request timed out after 30 seconds."
+        ) from error
+    except URLError as error:
+        if isinstance(error.reason, (TimeoutError, socket.timeout)):
+            raise PublicCaptionTimeoutError(
+                "Public caption request timed out after 30 seconds."
             ) from error
+        raise PublicCaptionNetworkError("Public caption network request failed.") from error
+    if len(payload) > MAX_PUBLIC_JSON_BYTES:
+        raise PublicCaptionLookupError(
+            "Public caption response exceeds the size limit."
+        )
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicCaptionLookupError(
+            "Public caption response is not valid UTF-8 JSON."
+        ) from error
+
+
+def _fetch_public_document(fetch_json, url: str, context: str) -> dict:
+    try:
+        return fetch_json(url)
+    except PublicCaptionLookupError as error:
+        raise type(error)(f"{context}: {error}") from error
+    except (TimeoutError, socket.timeout) as error:
+        raise PublicCaptionTimeoutError(f"{context}: public request timed out.") from error
+    except OSError as error:
+        raise PublicCaptionNetworkError(f"{context}: network request failed.") from error
 
 
 def _api_data(document: dict, endpoint: str) -> dict:
@@ -302,15 +343,37 @@ def _install_bounded_bilibili_extractor(ydl) -> None:
     ydl.add_info_extractor(extractor_type())
 
 
-def _add_public_subtitles(url: str, info: dict, fetch_json) -> None:
+def _add_public_subtitles(
+    url: str,
+    info: dict,
+    fetch_json,
+    *,
+    progress: ProgressReporter | None = None,
+) -> None:
     entries = _public_caption_entries(info)
     if entries and all(
         _has_chinese_caption_data(target) for _parent, target in entries
     ):
+        for current, (parent, _target) in enumerate(entries, start=1):
+            match = re.search(r"_p([1-9]\d*)$", str(parent.get("id") or ""))
+            part_number = int(match.group(1)) if match else current
+            emit_progress(
+                progress,
+                "caption",
+                "Existing Chinese caption track is usable",
+                current=current,
+                total=len(entries),
+                part_number=part_number,
+            )
         return
     bvid = parse_bv_url(url).bvid
+    emit_progress(progress, "caption-index", "Checking public caption index")
     view_data = _api_data(
-        fetch_json(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"),
+        _fetch_public_document(
+            fetch_json,
+            f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+            "Video caption index",
+        ),
         "Bilibili view API",
     )
     aid = view_data.get("aid")
@@ -327,19 +390,37 @@ def _add_public_subtitles(url: str, info: dict, fetch_json) -> None:
             raise PublicCaptionLookupError("Bilibili view API returned an invalid page.")
         pages[page["page"]] = page
     for default_part, (parent, target) in enumerate(entries, start=1):
-        if _has_chinese_caption_data(target):
-            continue
         match = re.search(r"_p([1-9]\d*)$", str(parent.get("id") or ""))
         part_number = int(match.group(1)) if match else default_part
+        if _has_chinese_caption_data(target):
+            emit_progress(
+                progress,
+                "caption",
+                "Existing Chinese caption track is usable",
+                current=default_part,
+                total=len(entries),
+                part_number=part_number,
+            )
+            continue
+        emit_progress(
+            progress,
+            "caption",
+            "Checking public caption tracks",
+            current=default_part,
+            total=len(entries),
+            part_number=part_number,
+        )
         page = pages.get(part_number)
         if page is None:
             raise PublicCaptionLookupError(
                 f"Bilibili view API has no page {part_number}."
             )
         dm_data = _api_data(
-            fetch_json(
+            _fetch_public_document(
+                fetch_json,
                 "https://api.bilibili.com/x/v2/dm/view"
-                f"?type=1&oid={page['cid']}&pid={aid}"
+                f"?type=1&oid={page['cid']}&pid={aid}",
+                f"Part {part_number} subtitle metadata",
             ),
             f"Bilibili dm/view API for part {part_number}",
         )
@@ -364,12 +445,19 @@ def _add_public_subtitles(url: str, info: dict, fetch_json) -> None:
                 for track in ordered_tracks
                 if _is_chinese_language(track["lan"])
             ]
+        caption_added = False
         for track in ordered_tracks:
             subtitle_url = _secure_subtitle_url(track["subtitle_url"])
             if subtitle_url is None:
                 continue
             try:
-                srt = bilibili_json_to_srt(fetch_json(subtitle_url))
+                srt = bilibili_json_to_srt(
+                    _fetch_public_document(
+                        fetch_json,
+                        subtitle_url,
+                        f"Part {part_number} caption download",
+                    )
+                )
             except (KeyError, TypeError, ValueError) as error:
                 raise PublicCaptionLookupError(
                     f"Bilibili returned an invalid caption document for part {part_number}."
@@ -379,7 +467,16 @@ def _add_public_subtitles(url: str, info: dict, fetch_json) -> None:
             target.setdefault("subtitles", {})[track["lan"]] = [
                 {"ext": "srt", "data": srt}
             ]
+            caption_added = True
             break
+        emit_progress(
+            progress,
+            "caption",
+            "Public caption track ready" if caption_added else "No public caption track found",
+            current=default_part,
+            total=len(entries),
+            part_number=part_number,
+        )
 
 
 def _materialize_entries(info: dict) -> None:
@@ -418,6 +515,7 @@ def fetch_info(
     public_json_fetcher=None,
     use_browser_cookies=False,
     playlist_end: int | None = 21,
+    progress: ProgressReporter | None = None,
 ) -> dict:
     parsed_url = parse_bv_url(url)
     use_public_fallback = ydl_factory is None or public_json_fetcher is not None
@@ -433,6 +531,7 @@ def fetch_info(
         "skip_download": True,
         "extract_flat": False,
         "writesubtitles": True,
+        "quiet": True,
     }
     if parsed_url.page is not None:
         base_options["playlist_items"] = str(parsed_url.page)
@@ -469,5 +568,6 @@ def fetch_info(
             url,
             info,
             public_json_fetcher or _download_public_json,
+            progress=progress,
         )
     return info

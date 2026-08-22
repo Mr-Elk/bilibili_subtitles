@@ -34,6 +34,42 @@ class PublicCaptionHttpError(PublicCaptionNetworkError):
     """Raised when a bounded public caption request returns an HTTP error."""
 
 
+_EXPECTED_ANONYMOUS_SUBTITLE_WARNING = (
+    "Subtitles are only available when logged in."
+)
+
+
+class _YtDlpLogger:
+    """Keep yt-dlp diagnostics inside this tool's governed output contract."""
+
+    def __init__(self, warn=None, *, public_fallback_enabled: bool):
+        self._warn = warn
+        self._public_fallback_enabled = public_fallback_enabled
+
+    def debug(self, _message: str) -> None:
+        pass
+
+    def info(self, _message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        message = str(message)
+        if (
+            self._public_fallback_enabled
+            and _EXPECTED_ANONYMOUS_SUBTITLE_WARNING in message
+        ):
+            return
+        if self._warn is None:
+            print(f"Warning: {message}", file=sys.stderr, flush=True)
+        else:
+            self._warn(message)
+
+    def error(self, _message: str) -> None:
+        # yt-dlp raises the corresponding failure; the CLI reports it once with
+        # workflow context instead of leaking an ungoverned duplicate here.
+        pass
+
+
 def _validate_https_url(raw_url: str, allowed_hosts) -> str:
     parsed = urlparse(raw_url)
     try:
@@ -532,6 +568,10 @@ def fetch_info(
         "extract_flat": False,
         "writesubtitles": True,
         "quiet": True,
+        "logger": _YtDlpLogger(
+            warn,
+            public_fallback_enabled=use_public_fallback,
+        ),
     }
     if parsed_url.page is not None:
         base_options["playlist_items"] = str(parsed_url.page)

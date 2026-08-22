@@ -404,6 +404,7 @@ class FetchInfoTests(unittest.TestCase):
     def test_existing_caption_progress_is_structured_and_yt_dlp_is_quiet(self):
         received_options = []
         events = []
+        warnings = []
 
         class FakeYoutubeDL:
             def __init__(self, options):
@@ -433,10 +434,19 @@ class FetchInfoTests(unittest.TestCase):
             "https://www.bilibili.com/video/BV1Ab411C7De",
             ydl_factory=FakeYoutubeDL,
             public_json_fetcher=lambda _url: self.fail("fallback must be skipped"),
+            warn=warnings.append,
             progress=events.append,
         )
 
         self.assertTrue(received_options[0]["quiet"])
+        logger = received_options[0]["logger"]
+        logger.warning(
+            "[BiliBili] Subtitles are only available when logged in. "
+            "Use browser cookies."
+        )
+        logger.warning("A different yt-dlp warning")
+        logger.error("A duplicate extractor error")
+        self.assertEqual(warnings, ["A different yt-dlp warning"])
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].phase, "caption")
         self.assertEqual(events[0].part_number, 1)

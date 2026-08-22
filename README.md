@@ -113,6 +113,7 @@ bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键
 
 - 环境缺失或损坏：运行 `.\setup.ps1 -Repair`。
 - 匿名访问找不到字幕：确认网页本身确实提供字幕；必要时再显式使用 `-UseBrowserCookies`。
+- 匿名提取时，工具会先检查 yt-dlp 可见字幕，再检查公开字幕接口；公开回退已启用时，不会重复显示“字幕需登录”的误导性提示，其他警告仍会正常显示。
 - Chrome Cookie 无法读取：关闭占用 Cookie 数据库的 Chrome 后重试。Windows/Chromium 的 DPAPI 解密问题可能仍使登录字幕不可用；不要把完整 Cookie 提交到仓库或第三方服务。
 - 提取长时间停留在某一阶段：根据进度中的分 P 和阶段定位；公开接口请求单次最多等待 30 秒。当前不自动重试未知失败，避免把一次等待静默放大为多次等待。
 

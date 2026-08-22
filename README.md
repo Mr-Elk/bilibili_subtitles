@@ -31,6 +31,8 @@
 
 修复会先保留带时间戳的旧环境，失败时自动还原。`install.ps1` 把轻量启动器安装到用户目录、完整保留用户 PATH，并让全局命令始终指向本项目这份源码。安装目录同时生成 `bili-subtitles.config.json`，所以安装完成后无需重启终端即可使用。
 
+`requirements.txt` 记录直接依赖，`requirements-lock.txt` 固定实际安装的完整依赖集合。更新依赖必须显式更新锁文件并重新执行完整验证，不会在安装时自动追随最新版。
+
 配置优先级为“本次命令 > 用户环境变量 > 安装目录配置 > 安全默认值”。输出目录使用 `BILIBILI_SUBTITLE_OUTPUT_ROOT`，大型合集阈值使用 `BILIBILI_SUBTITLE_MAX_PARTS`；通常只需通过 `install.ps1` 设置一次，也可以在单次命令中用 `-OutputRoot`、`-MaxParts` 覆盖。安装目录配置只保存工具路径、输出路径和分 P 阈值，不保存 Cookies 或其他登录信息。
 
 ## 提取字幕
@@ -87,12 +89,17 @@ bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键
 - `bili-subtitles.cmd`：全局命令启动器。
 - `extract.ps1`：兼容旧调用的薄代理，不再包含第二套运行逻辑。
 - `setup.ps1` / `install.ps1`：可重建环境和可重复安装。
+- `verify.ps1`：统一执行依赖、测试、编译、脚本语法和 Git 跟踪边界检查。
+- `GOVERNANCE.md`：稳定底座、私有数据、分支、依赖和提炼功能解冻规则。
 - `tests/`：离线单元测试与入口脚本测试。
 
 ## 验证与排错
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\verify.ps1
+
+# 提交后形成干净治理快照
+.\verify.ps1 -RequireClean
 ```
 
 - 环境缺失或损坏：运行 `.\setup.ps1 -Repair`。

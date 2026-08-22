@@ -96,7 +96,10 @@ if ([System.IO.Path]::GetDirectoryName($venv) -ne $toolRoot) {
     throw "Refusing to manage a virtual environment outside the tool directory."
 }
 $venvPython = Join-Path $venv "Scripts\python.exe"
-$requirements = Join-Path $toolRoot "requirements.txt"
+$requirements = Join-Path $toolRoot "requirements-lock.txt"
+if (-not (Test-Path -LiteralPath $requirements -PathType Leaf)) {
+    throw "Dependency lock is missing: $requirements"
+}
 $tests = Join-Path $toolRoot "tests"
 $backup = $null
 $createdNewVenv = $false

@@ -12,6 +12,51 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def test_governance_scripts_parse_and_setup_uses_dependency_lock(self):
+        for name in (
+            "setup.ps1",
+            "install.ps1",
+            "bilibili-subtitles.ps1",
+            "extract.ps1",
+            "verify.ps1",
+        ):
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "$tokens=$null; $errors=$null; "
+                        "[void][System.Management.Automation.Language.Parser]::"
+                        f"ParseFile('{PROJECT_ROOT / name}', [ref]$tokens, [ref]$errors); "
+                        "if($errors.Count -gt 0){$errors | ForEach-Object {$_.Message}; exit 1}"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        setup_text = (PROJECT_ROOT / "setup.ps1").read_text(encoding="utf-8")
+        verify_text = (PROJECT_ROOT / "verify.ps1").read_text(encoding="utf-8")
+        self.assertIn('Join-Path $toolRoot "requirements-lock.txt"', setup_text)
+        self.assertNotIn('Join-Path $toolRoot "requirements.txt"', setup_text)
+        self.assertIn("diff --cached --check", verify_text)
+        self.assertIn("Installed dependencies do not match", verify_text)
+
+    def test_governance_contract_keeps_private_outputs_untracked(self):
+        governance = (PROJECT_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")
+        ignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+        lock = (PROJECT_ROOT / "requirements-lock.txt").read_text(encoding="utf-8")
+
+        for marker in ("output/", ".course-learning-private/", "part-*.md"):
+            self.assertIn(marker, governance)
+        self.assertIn("AI-G0", governance)
+        self.assertIn(".course-learning-private/", ignore)
+        self.assertIn("yt-dlp[default]==2026.7.4", lock)
+
     def test_main_launcher_forwards_local_search_to_python_reader(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             transcript = Path(temp_dir) / "part-001.md"

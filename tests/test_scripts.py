@@ -148,10 +148,14 @@ class PowerShellScriptTests(unittest.TestCase):
 
         setup_text = (PROJECT_ROOT / "setup.ps1").read_text(encoding="utf-8")
         verify_text = (PROJECT_ROOT / "verify.ps1").read_text(encoding="utf-8")
+        launcher_text = (PROJECT_ROOT / "bilibili-subtitles.ps1").read_text(
+            encoding="utf-8"
+        )
         self.assertIn('Join-Path $toolRoot "requirements-lock.txt"', setup_text)
         self.assertNotIn('Join-Path $toolRoot "requirements.txt"', setup_text)
         self.assertIn("diff --cached --check", verify_text)
         self.assertIn("Installed dependencies do not match", verify_text)
+        self.assertIn('"Status", "Inventory"', launcher_text)
 
     def test_governance_contract_keeps_private_outputs_untracked(self):
         governance = (PROJECT_ROOT / "GOVERNANCE.md").read_text(encoding="utf-8")
@@ -307,6 +311,55 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["items"][0]["text"], "中文优化结果")
+
+    def test_main_launcher_exposes_manifest_status_as_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            (output_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "bvid": "BV1Ab411C7De",
+                        "title": "Status course",
+                        "source_url": "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "updated_at": "2026-08-22T12:00:00+08:00",
+                        "coverage_complete": True,
+                        "last_request": {"mode": "all"},
+                        "parts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["BILIBILI_SUBTITLE_PYTHON"] = sys.executable
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(PROJECT_ROOT / "bilibili-subtitles.ps1"),
+                    "-Action",
+                    "Status",
+                    "-Target",
+                    str(output_dir),
+                    "-Format",
+                    "Json",
+                    "-ToolRoot",
+                    str(PROJECT_ROOT),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["action"], "status")
+        self.assertTrue(payload["manifest"]["coverage_complete"])
 
     def test_installed_sidecar_resolves_tool_root_without_refreshed_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

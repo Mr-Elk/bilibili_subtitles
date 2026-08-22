@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import re
 
+from .output_manifest import ManifestValidationError, read_manifest
+
 
 class ReaderInputError(ValueError):
     """Raised when a local transcript read request is invalid."""
@@ -19,6 +21,7 @@ class LocalCaption:
 _TIMESTAMP = re.compile(r"^(\d{2,}):(\d{2}):(\d{2})$")
 _CAPTION_LINE = re.compile(r"^\[(\d{2,}:\d{2}:\d{2})\]\s+(\S.*)$")
 _DEFAULT_MAX_CHARS = {
+    "status": 6_000,
     "inventory": 6_000,
     "map": 8_000,
     "search": 4_000,
@@ -88,6 +91,83 @@ def transcript_title(path: Path) -> str:
     except (OSError, UnicodeError) as error:
         raise ReaderInputError(f"Cannot read transcript: {path}") from error
     return ""
+
+
+def status_manifest(target: str | Path) -> dict:
+    output_dir = Path(target)
+    if not output_dir.exists():
+        raise ReaderInputError(f"Path does not exist: {output_dir}")
+    if not output_dir.is_dir():
+        raise ReaderInputError("Status requires a BV output directory.")
+    try:
+        return read_manifest(output_dir)
+    except ManifestValidationError as error:
+        raise ReaderInputError(str(error)) from error
+
+
+def status_summary(manifest: dict) -> dict[str, object]:
+    captioned_count = sum(
+        part["status"] == "captioned" for part in manifest["parts"]
+    )
+    no_subtitles_count = sum(
+        part["status"] == "no_subtitles" for part in manifest["parts"]
+    )
+    return {
+        "schema_version": manifest["schema_version"],
+        "bvid": manifest["bvid"],
+        "title": manifest["title"],
+        "source_url": manifest["source_url"],
+        "updated_at": manifest["updated_at"],
+        "coverage_complete": manifest["coverage_complete"],
+        "last_request": dict(manifest["last_request"]),
+        "part_count": len(manifest["parts"]),
+        "captioned_count": captioned_count,
+        "no_subtitles_count": no_subtitles_count,
+    }
+
+
+def status_items(manifest: dict) -> list[dict[str, object]]:
+    return [
+        {
+            "part_number": part["part_number"],
+            "title": part["title"],
+            "status": part["status"],
+            "source_url": part["source_url"],
+            "language": part["language"],
+            "file": part["file"],
+            "extraction_method": part["extraction_method"],
+        }
+        for part in manifest["parts"]
+    ]
+
+
+def status(target: str | Path) -> list[str]:
+    manifest = status_manifest(target)
+    summary = status_summary(manifest)
+    request = json.dumps(
+        summary["last_request"], ensure_ascii=False, separators=(",", ":")
+    )
+    lines = [
+        f"BV\t{summary['bvid']}",
+        f"TITLE\t{summary['title']}",
+        f"UPDATED\t{summary['updated_at']}",
+        f"COVERAGE\t{'complete' if summary['coverage_complete'] else 'incomplete'}",
+        f"LAST_REQUEST\t{request}",
+        (
+            f"PARTS\t{summary['part_count']}\tCAPTIONED\t"
+            f"{summary['captioned_count']}\tNO_SUBTITLES\t"
+            f"{summary['no_subtitles_count']}"
+        ),
+        "PART\tSTATUS\tLANGUAGE\tFILE\tTITLE",
+    ]
+    for item in status_items(manifest):
+        language = item["language"] or "-"
+        filename = item["file"] or "-"
+        title = re.sub(r"\s+", " ", str(item["title"]).strip())
+        lines.append(
+            f"{item['part_number']}\t{item['status']}\t{language}\t{filename}\t{title}"
+        )
+    return lines
 
 
 def inventory_items(files: list[Path]) -> list[dict[str, object]]:
@@ -304,30 +384,37 @@ def reader_payload(
     normalized_action = action.lower()
     if normalized_action not in _DEFAULT_MAX_CHARS:
         raise ReaderInputError(f"Unsupported local read action: {action}")
-    files = transcript_files(target)
     match_count = None
-    if normalized_action == "inventory":
+    manifest_summary = None
+    if normalized_action == "status":
         parameters: dict[str, object] = {}
-        items = inventory_items(files)
-    elif normalized_action == "map":
-        parameters = {"chunk_chars": chunk_chars}
-        items = chunk_items(files, chunk_chars=chunk_chars)
-    elif normalized_action == "search":
-        effective_query = query or ""
-        parameters = {
-            "query": effective_query,
-            "context": context,
-            "max_results": max_results,
-        }
-        items, match_count = search_items(
-            files,
-            query=effective_query,
-            context=context,
-            max_results=max_results,
-        )
+        manifest = status_manifest(target)
+        manifest_summary = status_summary(manifest)
+        items = status_items(manifest)
     else:
-        parameters = {"start": start, "end": end}
-        items = slice_items(files, start=start, end=end)
+        files = transcript_files(target)
+        if normalized_action == "inventory":
+            parameters = {}
+            items = inventory_items(files)
+        elif normalized_action == "map":
+            parameters = {"chunk_chars": chunk_chars}
+            items = chunk_items(files, chunk_chars=chunk_chars)
+        elif normalized_action == "search":
+            effective_query = query or ""
+            parameters = {
+                "query": effective_query,
+                "context": context,
+                "max_results": max_results,
+            }
+            items, match_count = search_items(
+                files,
+                query=effective_query,
+                context=context,
+                max_results=max_results,
+            )
+        else:
+            parameters = {"start": start, "end": end}
+            items = slice_items(files, start=start, end=end)
 
     payload: dict[str, object] = {
         "schema": _READER_SCHEMA,
@@ -338,6 +425,8 @@ def reader_payload(
     }
     if match_count is not None:
         payload["match_count"] = match_count
+    if manifest_summary is not None:
+        payload["manifest"] = manifest_summary
     payload["items"] = items
     return payload
 
@@ -422,18 +511,21 @@ def read_transcripts(
         )
         return bounded_json(payload, limit=output_limit)
 
-    files = transcript_files(target)
-    if normalized_action == "inventory":
-        lines = inventory(files)
-    elif normalized_action == "map":
-        lines = chunk_map(files, chunk_chars=chunk_chars)
-    elif normalized_action == "search":
-        lines = search(
-            files,
-            query=query or "",
-            context=context,
-            max_results=max_results,
-        )
+    if normalized_action == "status":
+        lines = status(target)
     else:
-        lines = slice_captions(files, start=start, end=end)
+        files = transcript_files(target)
+        if normalized_action == "inventory":
+            lines = inventory(files)
+        elif normalized_action == "map":
+            lines = chunk_map(files, chunk_chars=chunk_chars)
+        elif normalized_action == "search":
+            lines = search(
+                files,
+                query=query or "",
+                context=context,
+                max_results=max_results,
+            )
+        else:
+            lines = slice_captions(files, start=start, end=end)
     return bounded_text(lines, limit=output_limit)

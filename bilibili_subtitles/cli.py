@@ -37,7 +37,7 @@ def main(
     )
     parser.add_argument(
         "--action",
-        choices=("extract", "inventory", "map", "search", "slice"),
+        choices=("extract", "status", "inventory", "map", "search", "slice"),
         default="extract",
         help="Operation to perform (default: extract)",
     )

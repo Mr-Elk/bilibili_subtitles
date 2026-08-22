@@ -785,6 +785,49 @@ class ExtractToMarkdownTests(unittest.TestCase):
             )
             self.assertFalse((video_dir / "part-001.md").exists())
 
+    def test_selected_part_refuses_a_corrupt_existing_manifest(self):
+        info = {
+            "id": "BV1Ab411C7De",
+            "title": "Fresh title",
+            "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\nfresh\n",
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            video_dir = output_root / "BV1Ab411C7De"
+            video_dir.mkdir()
+            corrupt_manifest = "{broken\n"
+            (video_dir / "manifest.json").write_text(
+                corrupt_manifest, encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+                extract_to_markdown(
+                    "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+                    output_root=output_root,
+                    fetch_info=lambda _url: info,
+                    extracted_at="2026-08-22T12:00:00+08:00",
+                )
+
+            self.assertEqual(
+                (video_dir / "manifest.json").read_text(encoding="utf-8"),
+                corrupt_manifest,
+            )
+            self.assertFalse(
+                any(
+                    path.is_dir()
+                    for path in output_root.glob(".BV1Ab411C7De-*")
+                )
+            )
+
     def test_fails_without_replacing_previous_output_when_no_part_has_subtitles(self):
         info = {
             "id": "BV1Ab411C7De",

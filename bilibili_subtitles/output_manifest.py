@@ -7,6 +7,14 @@ SCHEMA_VERSION = 1
 _PART_FILE = re.compile(r"part-(\d{3,})\.md")
 
 
+class ManifestValidationError(ValueError):
+    """Raised when an existing subtitle manifest cannot be trusted."""
+
+
+def _nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def new_manifest(
     *,
     bvid: str,
@@ -35,51 +43,124 @@ def _valid_part(item: object) -> bool:
         return False
     if part_number < 1 or item.get("status") not in {"captioned", "no_subtitles"}:
         return False
-    if not isinstance(item.get("title"), str) or not isinstance(
-        item.get("source_url"), str
+    if not _nonempty_string(item.get("title")) or not _nonempty_string(
+        item.get("source_url")
     ):
         return False
     if item["status"] == "captioned":
         return (
             item.get("file") == f"part-{part_number:03d}.md"
-            and isinstance(item.get("language"), str)
+            and _nonempty_string(item.get("language"))
             and item.get("extraction_method") == "existing_bilibili_captions"
         )
-    return item.get("file") is None and item.get("language") is None
+    return (
+        item.get("file") is None
+        and item.get("language") is None
+        and item.get("extraction_method") is None
+    )
+
+
+def _valid_last_request(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    mode = value.get("mode")
+    if mode in {"all", "unknown"}:
+        return True
+    if mode != "part":
+        return False
+    part_number = value.get("part_number")
+    return type(part_number) is int and part_number > 0
+
+
+def _validate_manifest(
+    manifest: object,
+    *,
+    output_dir: Path | None = None,
+    expected_bvid: str | None = None,
+) -> dict:
+    if not isinstance(manifest, dict):
+        raise ManifestValidationError("manifest.json must contain a JSON object.")
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
+        raise ManifestValidationError(
+            f"Unsupported manifest.json schema_version: {schema_version!r}."
+        )
+    bvid = manifest.get("bvid")
+    if not _nonempty_string(bvid) or (
+        expected_bvid is not None and bvid != expected_bvid
+    ):
+        raise ManifestValidationError("manifest.json has an invalid BV identifier.")
+    if not all(
+        _nonempty_string(manifest.get(field))
+        for field in ("title", "source_url", "updated_at")
+    ):
+        raise ManifestValidationError("manifest.json has invalid source metadata.")
+    if type(manifest.get("coverage_complete")) is not bool:
+        raise ManifestValidationError("manifest.json coverage_complete must be a boolean.")
+    if not _valid_last_request(manifest.get("last_request")):
+        raise ManifestValidationError("manifest.json has an invalid last_request.")
+    parts = manifest.get("parts")
+    if not isinstance(parts, list) or not all(_valid_part(item) for item in parts):
+        raise ManifestValidationError("manifest.json contains an invalid part entry.")
+    part_numbers = [item["part_number"] for item in parts]
+    if len(part_numbers) != len(set(part_numbers)):
+        raise ManifestValidationError("manifest.json contains duplicate part numbers.")
+
+    if output_dir is not None:
+        expected_files = {
+            item["file"] for item in parts if item["status"] == "captioned"
+        }
+        actual_files = {
+            path.name
+            for path in output_dir.glob("part-*.md")
+            if path.is_file()
+        }
+        missing_files = sorted(expected_files - actual_files)
+        if missing_files:
+            raise ManifestValidationError(
+                "manifest.json references missing transcript files: "
+                + ", ".join(missing_files)
+            )
+        orphan_files = sorted(actual_files - expected_files)
+        if orphan_files:
+            raise ManifestValidationError(
+                "Transcript files are not represented by manifest.json: "
+                + ", ".join(orphan_files)
+            )
+
+    validated = dict(manifest)
+    validated["parts"] = sorted(
+        (dict(item) for item in parts), key=lambda item: item["part_number"]
+    )
+    return validated
+
+
+def read_manifest(
+    output_dir: Path,
+    *,
+    expected_bvid: str | None = None,
+) -> dict:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ManifestValidationError(f"No manifest.json found in: {output_dir}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ManifestValidationError(
+            f"Cannot read a valid UTF-8 manifest.json in: {output_dir}"
+        ) from error
+    return _validate_manifest(
+        manifest,
+        output_dir=output_dir,
+        expected_bvid=expected_bvid,
+    )
 
 
 def _read_existing_manifest(output_dir: Path, bvid: str) -> dict | None:
     manifest_path = output_dir / "manifest.json"
-    if not manifest_path.is_file():
+    if not manifest_path.exists():
         return None
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != SCHEMA_VERSION
-        or manifest.get("bvid") != bvid
-        or not isinstance(manifest.get("title"), str)
-        or not isinstance(manifest.get("source_url"), str)
-        or not isinstance(manifest.get("updated_at"), str)
-        or not isinstance(manifest.get("parts"), list)
-        or not all(_valid_part(item) for item in manifest["parts"])
-    ):
-        return None
-    part_numbers = [item["part_number"] for item in manifest["parts"]]
-    if len(part_numbers) != len(set(part_numbers)):
-        return None
-    for item in manifest["parts"]:
-        if item["status"] == "captioned" and not (
-            output_dir / item["file"]
-        ).is_file():
-            return None
-    manifest["parts"] = sorted(
-        manifest["parts"], key=lambda item: item["part_number"]
-    )
-    manifest["coverage_complete"] = bool(manifest.get("coverage_complete"))
-    return manifest
+    return read_manifest(output_dir, expected_bvid=bvid)
 
 
 def _markdown_metadata(path: Path, bvid: str) -> dict | None:
@@ -184,9 +265,8 @@ def render_index(manifest: dict) -> str:
 
 
 def write_manifest(output_dir: Path, manifest: dict) -> None:
-    if not all(_valid_part(item) for item in manifest.get("parts", [])):
-        raise ValueError("Cannot write an invalid subtitle manifest.")
+    validated = _validate_manifest(manifest, output_dir=output_dir)
     (output_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(validated, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )

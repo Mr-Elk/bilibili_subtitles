@@ -19,7 +19,7 @@ param(
     [Parameter(Position = 0)]
     [string]$Url,
 
-    [ValidateSet("Extract", "Inventory", "Map", "Search", "Slice")]
+    [ValidateSet("Extract", "Status", "Inventory", "Map", "Search", "Slice")]
     [string]$Action = "Extract",
 
     [string]$Target,
@@ -83,6 +83,7 @@ Extract:
   bili-subtitles <BV URL> -UseBrowserCookies  Opt in to Chrome login state
 
 Read local captions with bounded output:
+  bili-subtitles -Action Status    -Target <BV-output-directory>
   bili-subtitles -Action Inventory -Target <file-or-directory>
   bili-subtitles -Action Map       -Target <file-or-directory>
   bili-subtitles -Action Search    -Target <file-or-directory> -Query <text>

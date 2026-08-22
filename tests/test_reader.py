@@ -23,7 +23,72 @@ def write_transcript(path: Path, title: str, captions: list[tuple[str, str]]) ->
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_status_fixture(output_dir: Path) -> None:
+    write_transcript(
+        output_dir / "part-001.md",
+        "Captioned part",
+        [("00:00:01", "governed caption")],
+    )
+    manifest = {
+        "schema_version": 1,
+        "bvid": "BV1Ab411C7De",
+        "title": "Governed course",
+        "source_url": "https://www.bilibili.com/video/BV1Ab411C7De",
+        "updated_at": "2026-08-22T12:00:00+08:00",
+        "coverage_complete": False,
+        "last_request": {"mode": "part", "part_number": 1},
+        "parts": [
+            {
+                "part_number": 1,
+                "title": "Captioned part",
+                "status": "captioned",
+                "source_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+                "language": "ai-zh",
+                "file": "part-001.md",
+                "extraction_method": "existing_bilibili_captions",
+            },
+            {
+                "part_number": 2,
+                "title": "Missing captions",
+                "status": "no_subtitles",
+                "source_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                "language": None,
+                "file": None,
+                "extraction_method": None,
+            },
+        ],
+    }
+    (output_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+
 class ReaderTests(unittest.TestCase):
+    def test_status_reports_manifest_coverage_in_text_and_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            write_status_fixture(output_dir)
+
+            text_status = read_transcripts("status", target=output_dir)
+            json_status = json.loads(
+                read_transcripts("status", target=output_dir, output_format="json")
+            )
+
+        self.assertIn("COVERAGE\tincomplete", text_status)
+        self.assertIn("PARTS\t2\tCAPTIONED\t1\tNO_SUBTITLES\t1", text_status)
+        self.assertEqual(json_status["action"], "status")
+        self.assertFalse(json_status["manifest"]["coverage_complete"])
+        self.assertEqual(json_status["manifest"]["no_subtitles_count"], 1)
+        self.assertEqual(json_status["items"][1]["status"], "no_subtitles")
+
+    def test_status_rejects_a_corrupt_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            (output_dir / "manifest.json").write_text("{broken", encoding="utf-8")
+
+            with self.assertRaisesRegex(ReaderInputError, "valid UTF-8"):
+                read_transcripts("status", target=output_dir)
+
     def test_inventory_reports_file_range_size_and_title(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "part-001.md"

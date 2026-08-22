@@ -21,6 +21,48 @@ main = getattr(cli, "main", None)
 
 
 class CliTests(unittest.TestCase):
+    def test_local_status_is_manifest_aware_without_network_access(self):
+        stdout = io.StringIO()
+
+        def unexpected_fetch(_url):
+            raise AssertionError("Local status must not access the network")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            (output_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "bvid": "BV1Ab411C7De",
+                        "title": "Status course",
+                        "source_url": "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "updated_at": "2026-08-22T12:00:00+08:00",
+                        "coverage_complete": True,
+                        "last_request": {"mode": "all"},
+                        "parts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            exit_code = main(
+                [
+                    "--action",
+                    "status",
+                    "--target",
+                    str(output_dir),
+                    "--format",
+                    "json",
+                ],
+                info_fetcher=unexpected_fetch,
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["action"], "status")
+        self.assertTrue(payload["manifest"]["coverage_complete"])
+
     def test_local_search_does_not_initialize_the_network_fetcher(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

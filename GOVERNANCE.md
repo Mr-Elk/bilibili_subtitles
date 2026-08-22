@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-- `main` 是唯一稳定底座，负责字幕提取、`manifest.json`、Inventory、Map、Search、Slice、安装和验证。
+- `main` 是唯一稳定底座，负责字幕提取、`manifest.json`、Status、Inventory、Map、Search、Slice、安装和验证。
 - `feature/course-learning-source-pack` 只为未来的来源重构包试点保留。它可以快进接收 `main` 的治理提交，但在 AI-G0 通过或所有者明确替代该决定前，不实现模型调用或真实课程试点。
 - 当前没有远端发布、版本标签或自动部署。Git 提交只证明源码历史，不证明安装、真实联网提取、课程处理或学习完成。
 
@@ -48,6 +48,7 @@ Git 只保存源码、测试、协议、提示模板和治理文档。下列内�
 ## 数据与协议
 
 - `manifest.json` schema v1 是后续本地工具的稳定目录接口；Markdown 服务于人工阅读。
+- `Status` 必须按 schema v1 严格核对清单与字幕文件。只有清单确实不存在时才允许旧 Markdown 迁移；清单存在但损坏、版本不支持或文件不一致时必须失败关闭。
 - 原字幕文件保持只读语义。任何校正、推断或摘要必须写入独立成果，并保留时间戳、来源和不确定性。
 - `no_subtitles` 是显式覆盖状态，不得伪造空字幕或把缺失字幕当作提取成功。
 - `READER_JSON_V1.md` 的协议变化需要新版本或向后兼容测试。

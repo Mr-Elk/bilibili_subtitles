@@ -1,6 +1,6 @@
 # 本地字幕读取 JSON 协议 v1
 
-本协议供脚本和后续工具读取 `Inventory`、`Map`、`Search`、`Slice` 的结果。文本输出仍是默认格式；需要机器读取时显式传入 `-Format Json`。
+本协议供脚本和后续工具读取 `Status`、`Inventory`、`Map`、`Search`、`Slice` 的结果。文本输出仍是默认格式；需要机器读取时显式传入 `-Format Json`。
 
 ## 通用结构
 
@@ -9,7 +9,7 @@
 ```
 
 - `schema` 与 `schema_version`：协议身份和版本。后续不兼容变更必须提升版本。
-- `action`：`inventory`、`map`、`search` 或 `slice`。
+- `action`：`status`、`inventory`、`map`、`search` 或 `slice`。
 - `target`：本次读取的绝对文件或目录路径。
 - `parameters`：影响结果的动作参数。
 - `item_count`：限长前的条目数。
@@ -20,6 +20,7 @@
 
 ## 各动作条目
 
+- `status`：顶层 `manifest` 报告 BV、标题、更新时间、覆盖状态、上次请求和状态计数；`items` 包含 `part_number`、`title`、`status`、`source_url`、`language`、`file`、`extraction_method`。它要求目标是包含有效 `manifest.json` 的 BV 输出目录。
 - `inventory`：`file`、`cue_count`、`start`、`end`、`text_chars`、`title`。
 - `map`：`chunk_id`、`file`、`chunk`、`start`、`end`、`cue_count`、`text_chars`。
 - `search`：`file`、`timestamp`、`seconds`、`text`、`is_match`。`is_match=false` 表示上下文字幕。

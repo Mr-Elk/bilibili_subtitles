@@ -62,6 +62,9 @@ bili-subtitles "https://www.bilibili.com/video/BVxxxxxxxxxx" -UseBrowserCookies
 ## 少量读取，减少 token
 
 ```powershell
+# 先确认清单有效、覆盖是否完整以及哪些分 P 没有字幕
+bili-subtitles -Action Status -Target "D:\subtitles\BVxxxxxxxxxx"
+
 # 先看有多少文件、字幕范围与字符量
 bili-subtitles -Action Inventory -Target "D:\subtitles\BVxxxxxxxxxx"
 
@@ -78,13 +81,13 @@ bili-subtitles -Action Map -Target "D:\subtitles\BVxxxxxxxxxx" -ChunkChars 5000
 bili-subtitles -Action Search -Target "D:\subtitles\BVxxxxxxxxxx" -Query "关键词" -Format Json
 ```
 
-这些读取动作默认限制终端输出长度，也可以用 `-MaxChars` 调整。`-Format Json` 输出紧凑的 UTF-8 JSON；达到长度限制时只移除完整条目并标记 `truncated`，不会截断成无效 JSON。协议见 [READER_JSON_V1.md](READER_JSON_V1.md)。它们只读取本地 `part-*.md`，不会初始化 yt-dlp、访问 B 站或调用大模型。运行 `bili-subtitles --help` 查看简明帮助。
+这些读取动作默认限制终端输出长度，也可以用 `-MaxChars` 调整。`Status` 严格核对 `manifest.json` 与字幕文件，报告覆盖范围、上次请求以及 `captioned` / `no_subtitles` 数量；清单损坏、版本不支持或文件不一致时会失败，不会把它静默当成旧格式。`-Format Json` 输出紧凑的 UTF-8 JSON；达到长度限制时只移除完整条目并标记 `truncated`，不会截断成无效 JSON。协议见 [READER_JSON_V1.md](READER_JSON_V1.md)。它们只读取本地清单和 `part-*.md`，不会初始化 yt-dlp、访问 B 站或调用大模型。运行 `bili-subtitles --help` 查看简明帮助。
 
 ## 项目结构
 
 - `bilibili_subtitles/`：URL 校验、字幕获取、分 P 选择、Markdown 写入与回滚。
 - `bilibili_subtitles/output_manifest.py`：结构化结果协议、旧输出迁移与单 P 合并。
-- `bilibili_subtitles/reader.py`：Inventory、Map、Search、Slice、文本/JSON 渲染和输出限长；可以独立单测和被后续工具复用。
+- `bilibili_subtitles/reader.py`：Status、Inventory、Map、Search、Slice、文本/JSON 渲染和输出限长；可以独立单测和被后续工具复用。
 - `bilibili-subtitles.ps1`：统一入口，只负责运行环境定位、兼容参数和结果转发。
 - `bili-subtitles.cmd`：全局命令启动器。
 - `extract.ps1`：兼容旧调用的薄代理，不再包含第二套运行逻辑。

@@ -1,7 +1,9 @@
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import msvcrt
+import os
 from pathlib import Path
 import re
 import shutil
@@ -33,6 +35,10 @@ class ConcurrentExtractionError(RuntimeError):
     """Raised when another process is extracting the same video."""
 
 
+class UserOutputChangedError(RuntimeError):
+    """Raised when user-owned output changes while extraction is running."""
+
+
 class PartSelectionRequiredError(ValueError):
     """Raised when a collection needs an explicit page or all-parts choice."""
 
@@ -46,6 +52,50 @@ class ExtractionResult:
     success_count: int
     no_subtitle_count: int
     output_dir: Path
+
+
+def _is_managed_output_name(name: str) -> bool:
+    return name in {"manifest.json", "index.md"} or is_transcript_filename(name)
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _snapshot_user_entry(
+    path: Path,
+    *,
+    root: Path,
+    snapshot: dict[str, tuple[str, ...]],
+) -> None:
+    relative_name = path.relative_to(root).as_posix()
+    if path.is_symlink():
+        snapshot[relative_name] = ("symlink", os.readlink(path))
+        return
+    if path.is_dir():
+        snapshot[relative_name] = ("directory",)
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            _snapshot_user_entry(child, root=root, snapshot=snapshot)
+        return
+    if path.is_file():
+        snapshot[relative_name] = ("file", str(path.stat().st_size), _hash_file(path))
+        return
+    snapshot[relative_name] = ("other",)
+
+
+def _snapshot_user_output(output_dir: Path) -> dict[str, tuple[str, ...]]:
+    if not output_dir.is_dir():
+        return {}
+    snapshot: dict[str, tuple[str, ...]] = {}
+    for path in sorted(output_dir.iterdir(), key=lambda item: item.name):
+        if _is_managed_output_name(path.name):
+            continue
+        _snapshot_user_entry(path, root=output_dir, snapshot=snapshot)
+    return snapshot
 
 
 def _is_anthology_entry(entry: dict, bvid: str) -> bool:
@@ -236,6 +286,7 @@ def _extract_to_markdown_locked(
 ) -> ExtractionResult:
     output_dir = output_root / parsed_url.bvid
     _recover_output(output_root, output_dir, parsed_url.bvid)
+    user_output_snapshot = _snapshot_user_output(output_dir)
     request_url = parsed_url.canonical_url
     if selected_page is not None:
         request_url += f"?p={selected_page}"
@@ -263,6 +314,7 @@ def _extract_to_markdown_locked(
     staging_dir = Path(
         tempfile.mkdtemp(prefix=f".{parsed_url.bvid}-", dir=output_root)
     )
+    backup_dir = output_root / f".{parsed_url.bvid}-backup-{uuid4().hex}"
 
     try:
         info_title = info.get("title") or parsed_url.bvid
@@ -275,7 +327,9 @@ def _extract_to_markdown_locked(
                 updated_at=extracted_at,
             )
             if output_dir.is_dir():
-                shutil.copytree(output_dir, staging_dir, dirs_exist_ok=True)
+                shutil.copytree(
+                    output_dir, staging_dir, dirs_exist_ok=True, symlinks=True
+                )
             if not manifest["parts"]:
                 manifest["title"] = info_title
             manifest["last_request"] = {
@@ -284,7 +338,9 @@ def _extract_to_markdown_locked(
             }
         else:
             if output_dir.is_dir():
-                shutil.copytree(output_dir, staging_dir, dirs_exist_ok=True)
+                shutil.copytree(
+                    output_dir, staging_dir, dirs_exist_ok=True, symlinks=True
+                )
                 for existing_path in staging_dir.iterdir():
                     if (
                         existing_path.is_file()
@@ -398,15 +454,19 @@ def _extract_to_markdown_locked(
         manifest["updated_at"] = extracted_at
         write_manifest(staging_dir, manifest)
         (staging_dir / "index.md").write_text(render_index(manifest), encoding="utf-8")
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
+        if _snapshot_user_output(output_dir) != user_output_snapshot:
+            raise UserOutputChangedError(
+                "User-owned files changed during extraction; previous output was preserved."
+            )
 
-    backup_dir = output_root / f".{parsed_url.bvid}-backup-{uuid4().hex}"
-    emit_progress(progress, "publish", "Publishing atomic subtitle output")
-    try:
+        emit_progress(progress, "publish", "Publishing atomic subtitle output")
         if output_dir.exists():
             output_dir.rename(backup_dir)
+            if _snapshot_user_output(backup_dir) != user_output_snapshot:
+                backup_dir.rename(output_dir)
+                raise UserOutputChangedError(
+                    "User-owned files changed during extraction; previous output was preserved."
+                )
         staging_dir.rename(output_dir)
     except BaseException:
         if backup_dir.exists() and not output_dir.exists():

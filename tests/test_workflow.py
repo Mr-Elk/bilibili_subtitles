@@ -37,6 +37,11 @@ ConcurrentExtractionError = getattr(
     "ConcurrentExtractionError",
     MissingConcurrentExtractionError,
 )
+UserOutputChangedError = getattr(
+    workflow,
+    "UserOutputChangedError",
+    RuntimeError,
+)
 
 
 class ExtractToMarkdownTests(unittest.TestCase):
@@ -124,6 +129,113 @@ class ExtractToMarkdownTests(unittest.TestCase):
                 "[00:00:01] 新字幕",
                 (output_dir / "part-001.md").read_text(encoding="utf-8"),
             )
+
+    def test_user_file_change_during_extraction_aborts_publish(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Fresh captions",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\nnew caption\n",
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            output_dir = output_root / "BV1Ab411C7De"
+            notes_dir = output_dir / "notes"
+            notes_dir.mkdir(parents=True)
+            note = notes_dir / "lesson.md"
+            note.write_text("before\n", encoding="utf-8")
+            transcript = output_dir / "part-001.md"
+            transcript.write_text("old caption\n", encoding="utf-8")
+            real_write_manifest = workflow.write_manifest
+
+            def edit_note_before_publish(staging_dir, manifest):
+                note.write_text("edited during extraction\n", encoding="utf-8")
+                return real_write_manifest(staging_dir, manifest)
+
+            with patch.object(
+                workflow,
+                "write_manifest",
+                side_effect=edit_note_before_publish,
+            ):
+                with self.assertRaisesRegex(
+                    UserOutputChangedError,
+                    "User-owned files changed",
+                ):
+                    extract_to_markdown(
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        output_root=output_root,
+                        fetch_info=lambda _url: info,
+                        extracted_at="2026-08-22T18:30:00+08:00",
+                    )
+
+            self.assertEqual(note.read_text(encoding="utf-8"), "edited during extraction\n")
+            self.assertEqual(transcript.read_text(encoding="utf-8"), "old caption\n")
+            self.assertEqual(list(output_root.glob(".BV1Ab411C7De-*")), [])
+
+    def test_user_file_change_at_publish_boundary_restores_current_output(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Fresh captions",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\nnew caption\n",
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            output_dir = output_root / "BV1Ab411C7De"
+            output_dir.mkdir()
+            note = output_dir / "lesson.md"
+            note.write_text("before\n", encoding="utf-8")
+            transcript = output_dir / "part-001.md"
+            transcript.write_text("old caption\n", encoding="utf-8")
+            real_snapshot = workflow._snapshot_user_output
+            snapshot_calls = 0
+
+            def edit_note_after_precheck(path):
+                nonlocal snapshot_calls
+                snapshot_calls += 1
+                result = real_snapshot(path)
+                if snapshot_calls == 2:
+                    note.write_text("edited at publish boundary\n", encoding="utf-8")
+                return result
+
+            with patch.object(
+                workflow,
+                "_snapshot_user_output",
+                side_effect=edit_note_after_precheck,
+            ):
+                with self.assertRaisesRegex(
+                    UserOutputChangedError,
+                    "User-owned files changed",
+                ):
+                    extract_to_markdown(
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        output_root=output_root,
+                        fetch_info=lambda _url: info,
+                        extracted_at="2026-08-22T18:31:00+08:00",
+                    )
+
+            self.assertEqual(
+                note.read_text(encoding="utf-8"),
+                "edited at publish boundary\n",
+            )
+            self.assertEqual(transcript.read_text(encoding="utf-8"), "old caption\n")
+            self.assertEqual(list(output_root.glob(".BV1Ab411C7De-*")), [])
 
     def test_restores_previous_output_when_publishing_staging_fails(self):
         info = {

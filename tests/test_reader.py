@@ -121,7 +121,15 @@ class ReaderTests(unittest.TestCase):
 
             files = transcript_files(root)
 
-        self.assertEqual([path.name for path in files], ["part-002.md", "part-010.md"])
+            self.assertEqual([path.name for path in files], ["part-002.md", "part-010.md"])
+
+    def test_direct_noncanonical_markdown_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = Path(temp_dir) / "part-001-learning-note-draft.md"
+            note.write_text("# private note\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ReaderInputError, "canonical part-NNN.md"):
+                transcript_files(note)
 
     def test_chunk_map_splits_before_crossing_the_character_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:

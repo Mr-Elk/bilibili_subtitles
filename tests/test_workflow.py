@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import threading
@@ -20,6 +21,11 @@ UnsupportedVideoStructureError = getattr(
     workflow,
     "UnsupportedVideoStructureError",
     RuntimeError,
+)
+PartSelectionRequiredError = getattr(
+    workflow,
+    "PartSelectionRequiredError",
+    ValueError,
 )
 MissingConcurrentExtractionError = type(
     "MissingConcurrentExtractionError",
@@ -467,7 +473,7 @@ class ExtractToMarkdownTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             result = extract_to_markdown(
-                "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                "https://www.bilibili.com/video/BV1Ab411C7De",
                 output_root=Path(temp_dir),
                 fetch_info=lambda _url: info,
                 extracted_at="2026-08-14T18:30:00+08:00",
@@ -486,6 +492,241 @@ class ExtractToMarkdownTests(unittest.TestCase):
             index = (video_dir / "index.md").read_text(encoding="utf-8")
             self.assertIn("[第一部分](part-001.md)", index)
             self.assertIn("第二部分: `no_subtitles`", index)
+            manifest = json.loads(
+                (video_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertTrue(manifest["coverage_complete"])
+            self.assertEqual(
+                [part["status"] for part in manifest["parts"]],
+                ["captioned", "no_subtitles"],
+            )
+
+    def test_url_page_query_extracts_only_that_part(self):
+        info = {
+            "_type": "playlist",
+            "id": "BV1Ab411C7De",
+            "title": "示例多P视频",
+            "entries": [
+                {
+                    "id": "BV1Ab411C7De_p1",
+                    "title": "第一部分",
+                    "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+                    "subtitles": {
+                        "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\n第一部分\n"}]
+                    },
+                },
+                {
+                    "id": "BV1Ab411C7De_p2",
+                    "title": "第二部分",
+                    "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                    "subtitles": {
+                        "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\n第二部分\n"}]
+                    },
+                },
+            ],
+        }
+        requested_urls = []
+
+        def fake_fetch(url):
+            requested_urls.append(url)
+            return info
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                output_root=Path(temp_dir),
+                fetch_info=fake_fetch,
+                extracted_at="2026-08-14T18:30:00+08:00",
+            )
+            video_dir = Path(temp_dir) / "BV1Ab411C7De"
+
+            self.assertEqual(result.success_count, 1)
+            self.assertEqual(requested_urls, ["https://www.bilibili.com/video/BV1Ab411C7De?p=2"])
+            self.assertFalse((video_dir / "part-001.md").exists())
+            self.assertTrue((video_dir / "part-002.md").is_file())
+            manifest = json.loads(
+                (video_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(manifest["coverage_complete"])
+            self.assertEqual(
+                manifest["last_request"],
+                {"mode": "part", "part_number": 2},
+            )
+
+    def test_selected_part_atomically_updates_without_removing_other_parts(self):
+        original_info = {
+            "_type": "playlist",
+            "id": "BV1Ab411C7De",
+            "title": "完整合集",
+            "entries": [
+                {
+                    "id": "BV1Ab411C7De_p1",
+                    "title": "第一部分",
+                    "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+                    "subtitles": {
+                        "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\n保留第一部分\n"}]
+                    },
+                },
+                {
+                    "id": "BV1Ab411C7De_p2",
+                    "title": "第二部分",
+                    "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                    "subtitles": {
+                        "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\n旧第二部分\n"}]
+                    },
+                },
+            ],
+        }
+        updated_part = {
+            "_type": "video",
+            "id": "BV1Ab411C7De_p2",
+            "title": "第二部分（更新）",
+            "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+            "subtitles": {
+                "ai-zh": [{"ext": "srt", "data": "1\n00:00:03,000 --> 00:00:04,000\n新第二部分\n"}]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De",
+                output_root=output_root,
+                fetch_info=lambda _url: original_info,
+                extracted_at="2026-08-14T18:30:00+08:00",
+            )
+            video_dir = output_root / "BV1Ab411C7De"
+            original_first_part = (video_dir / "part-001.md").read_text(
+                encoding="utf-8"
+            )
+
+            extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                output_root=output_root,
+                fetch_info=lambda _url: updated_part,
+                extracted_at="2026-08-15T18:30:00+08:00",
+            )
+
+            self.assertEqual(
+                (video_dir / "part-001.md").read_text(encoding="utf-8"),
+                original_first_part,
+            )
+            self.assertIn(
+                "[00:00:03] 新第二部分",
+                (video_dir / "part-002.md").read_text(encoding="utf-8"),
+            )
+            manifest = json.loads(
+                (video_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["coverage_complete"])
+            self.assertEqual(
+                [part["part_number"] for part in manifest["parts"]],
+                [1, 2],
+            )
+            self.assertEqual(
+                manifest["last_request"],
+                {"mode": "part", "part_number": 2},
+            )
+            index = (video_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("[第一部分](part-001.md)", index)
+            self.assertIn("[第二部分（更新）](part-002.md)", index)
+
+    def test_selected_part_migrates_legacy_markdown_without_deleting_it(self):
+        first_part = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "第一部分",
+            "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=1",
+            "subtitles": {
+                "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\n旧格式字幕\n"}]
+            },
+        }
+        second_part = {
+            "_type": "video",
+            "id": "BV1Ab411C7De_p2",
+            "title": "第二部分",
+            "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+            "subtitles": {
+                "zh-Hans": [{"ext": "srt", "data": "1\n00:00:03,000 --> 00:00:04,000\n新增字幕\n"}]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = Path(temp_dir)
+            extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De",
+                output_root=output_root,
+                fetch_info=lambda _url: first_part,
+                extracted_at="2026-08-14T18:30:00+08:00",
+            )
+            video_dir = output_root / "BV1Ab411C7De"
+            (video_dir / "manifest.json").unlink()
+
+            extract_to_markdown(
+                "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                output_root=output_root,
+                fetch_info=lambda _url: second_part,
+                extracted_at="2026-08-15T18:30:00+08:00",
+            )
+
+            self.assertTrue((video_dir / "part-001.md").is_file())
+            self.assertTrue((video_dir / "part-002.md").is_file())
+            manifest = json.loads(
+                (video_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(manifest["coverage_complete"])
+            self.assertEqual(
+                [part["part_number"] for part in manifest["parts"]],
+                [1, 2],
+            )
+
+    def test_large_anthology_requires_an_explicit_choice(self):
+        entries = []
+        for part in range(1, 22):
+            entries.append(
+                {
+                    "id": f"BV1Ab411C7De_p{part}",
+                    "title": f"第{part}部分",
+                    "webpage_url": f"https://www.bilibili.com/video/BV1Ab411C7De?p={part}",
+                    "subtitles": {},
+                }
+            )
+        info = {
+            "_type": "playlist",
+            "id": "BV1Ab411C7De",
+            "title": "大型合集",
+            "entries": entries,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(PartSelectionRequiredError):
+                extract_to_markdown(
+                    "https://www.bilibili.com/video/BV1Ab411C7De",
+                    output_root=Path(temp_dir),
+                    fetch_info=lambda _url: info,
+                    extracted_at="2026-08-14T18:30:00+08:00",
+                )
+
+    def test_rejects_a_nonexistent_page_on_a_single_part_video(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Single-part video",
+            "webpage_url": "https://www.bilibili.com/video/BV1Ab411C7De",
+            "subtitles": {
+                "zh-Hans": [{"ext": "srt", "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n"}]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(PartSelectionRequiredError, "Part 2"):
+                extract_to_markdown(
+                    "https://www.bilibili.com/video/BV1Ab411C7De?p=2",
+                    output_root=Path(temp_dir),
+                    fetch_info=lambda _url: info,
+                    extracted_at="2026-08-14T18:30:00+08:00",
+                )
 
     def test_keeps_previous_output_when_a_new_run_fails_midway(self):
         info = {

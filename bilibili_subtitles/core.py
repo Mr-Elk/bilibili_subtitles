@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 class InvalidBilibiliUrl(ValueError):
@@ -11,6 +11,7 @@ class InvalidBilibiliUrl(ValueError):
 class BilibiliUrl:
     bvid: str
     canonical_url: str
+    page: int | None
 
 
 @dataclass(frozen=True)
@@ -50,9 +51,17 @@ def parse_bv_url(raw_url: str) -> BilibiliUrl:
         )
 
     bvid = path_match.group(1)
+    page_values = parse_qs(parsed.query, keep_blank_values=True).get("p", [])
+    if page_values and (
+        len(page_values) != 1
+        or re.fullmatch(r"[1-9]\d*", page_values[0]) is None
+    ):
+        raise InvalidBilibiliUrl("Bilibili part query p must be a positive integer.")
+    page = int(page_values[0]) if page_values else None
     return BilibiliUrl(
         bvid=bvid,
         canonical_url=f"https://www.bilibili.com/video/{bvid}",
+        page=page,
     )
 
 

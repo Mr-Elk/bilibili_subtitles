@@ -27,6 +27,7 @@ class ParseBvUrlTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed.bvid, "BV1Ab411C7De")
+        self.assertEqual(parsed.page, 3)
         self.assertEqual(
             parsed.canonical_url,
             "https://www.bilibili.com/video/BV1Ab411C7De",
@@ -42,6 +43,9 @@ class ParseBvUrlTests(unittest.TestCase):
             "https://user@www.bilibili.com/video/BV1Ab411C7De",
             "https://www.bilibili.com:443/video/BV1Ab411C7De",
             "https://www.bilibili.com/video//BV1Ab411C7De",
+            "https://www.bilibili.com/video/BV1Ab411C7De?p=0",
+            "https://www.bilibili.com/video/BV1Ab411C7De?p=abc",
+            "https://www.bilibili.com/video/BV1Ab411C7De?p=1&p=2",
         ]
 
         for raw_url in unsupported_urls:

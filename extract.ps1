@@ -1,3 +1,8 @@
+<#
+Backward-compatible entry point. New usage should prefer bili-subtitles.cmd or
+bilibili-subtitles.ps1 so extraction and bounded local reading share one CLI.
+#>
+
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Url,
@@ -6,30 +11,50 @@ param(
     [string]$OutputRoot,
 
     [Alias("no-browser-cookies")]
-    [switch]$NoBrowserCookies
+    [switch]$NoBrowserCookies,
+
+    [Alias("use-browser-cookies")]
+    [switch]$UseBrowserCookies,
+
+    [ValidateRange(1, 10000)]
+    [int]$Page,
+
+    [switch]$AllParts,
+    [ValidateRange(0, 1000)]
+    [int]$MaxParts = 0
 )
 
-$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    [Console]::Error.WriteLine("Python environment not found. Run .\setup.ps1 first.")
+$launcher = Join-Path $PSScriptRoot "bilibili-subtitles.ps1"
+if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+    [Console]::Error.WriteLine(
+        "Main launcher not found. Restore bilibili-subtitles.ps1 or reinstall the tool."
+    )
     exit 1
 }
 
-$previousLocation = Get-Location
-try {
-    Set-Location -LiteralPath $PSScriptRoot
-    $toolArguments = @($Url)
-    if ($OutputRoot) {
-        $toolArguments += "--output-root"
-        $toolArguments += $OutputRoot
-    }
-    if ($NoBrowserCookies) {
-        $toolArguments += "--no-browser-cookies"
-    }
-    $toolArguments += $args
-    & $python -m bilibili_subtitles @toolArguments
-    $toolExitCode = $LASTEXITCODE
-} finally {
-    Set-Location -LiteralPath $previousLocation
+$launcherArguments = @($Url)
+if ($OutputRoot) {
+    $launcherArguments += "-OutputRoot"
+    $launcherArguments += $OutputRoot
 }
-exit $toolExitCode
+if ($NoBrowserCookies) {
+    $launcherArguments += "-NoBrowserCookies"
+}
+if ($UseBrowserCookies) {
+    $launcherArguments += "-UseBrowserCookies"
+}
+if ($Page -gt 0) {
+    $launcherArguments += "-Page"
+    $launcherArguments += $Page.ToString()
+}
+if ($AllParts) {
+    $launcherArguments += "-AllParts"
+}
+if ($MaxParts -gt 0) {
+    $launcherArguments += "-MaxParts"
+    $launcherArguments += $MaxParts.ToString()
+}
+$launcherArguments += $args
+
+& $launcher @launcherArguments
+exit $LASTEXITCODE

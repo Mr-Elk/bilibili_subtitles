@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,112 @@ main = getattr(cli, "main", None)
 
 
 class CliTests(unittest.TestCase):
-    def test_no_browser_cookies_option_reaches_default_fetcher(self):
+    def test_local_search_does_not_initialize_the_network_fetcher(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def unexpected_fetch(_url):
+            raise AssertionError("Local transcript reads must not access the network")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir) / "part-001.md"
+            transcript.write_text(
+                "# Local transcript\n\n## Transcript\n\n"
+                "[00:00:01] before\n"
+                "[00:00:02] token-saving result\n",
+                encoding="utf-8",
+            )
+            exit_code = main(
+                [
+                    "--action",
+                    "search",
+                    "--target",
+                    str(transcript),
+                    "--query",
+                    "TOKEN",
+                    "--context",
+                    "0",
+                ],
+                info_fetcher=unexpected_fetch,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "[part-001.md 00:00:02] token-saving result\n",
+        )
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_local_read_reports_an_invalid_target_without_a_traceback(self):
+        stderr = io.StringIO()
+
+        exit_code = main(
+            ["--action", "inventory", "--target", "missing-transcript"],
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Path does not exist", stderr.getvalue())
+
+    def test_local_json_output_is_parseable_without_network_access(self):
+        stdout = io.StringIO()
+
+        def unexpected_fetch(_url):
+            raise AssertionError("Local JSON reads must not access the network")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir) / "part-001.md"
+            transcript.write_text(
+                "# JSON\n\n## Transcript\n\n[00:00:01] machine result\n",
+                encoding="utf-8",
+            )
+            exit_code = main(
+                [
+                    "--action",
+                    "search",
+                    "--target",
+                    str(transcript),
+                    "--query",
+                    "machine",
+                    "--context",
+                    "0",
+                    "--format",
+                    "json",
+                ],
+                info_fetcher=unexpected_fetch,
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["action"], "search")
+        self.assertEqual(payload["items"][0]["text"], "machine result")
+
+    def test_extract_rejects_json_format_before_fetching(self):
+        stderr = io.StringIO()
+
+        def unexpected_fetch(_url):
+            raise AssertionError("Invalid extract format must fail before fetching")
+
+        exit_code = main(
+            [
+                "https://www.bilibili.com/video/BV1Ab411C7De",
+                "--format",
+                "json",
+            ],
+            info_fetcher=unexpected_fetch,
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("only supported for local read actions", stderr.getvalue())
+
+    def test_anonymous_access_is_the_default(self):
         info = {
             "_type": "video",
             "id": "BV1Ab411C7De",
@@ -36,8 +142,8 @@ class CliTests(unittest.TestCase):
         }
         calls = []
 
-        def fake_fetch(url, *, use_browser_cookies):
-            calls.append((url, use_browser_cookies))
+        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+            calls.append((url, use_browser_cookies, playlist_end))
             return info
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -47,7 +153,6 @@ class CliTests(unittest.TestCase):
                         "https://www.bilibili.com/video/BV1Ab411C7De",
                         "--output-root",
                         temp_dir,
-                        "--no-browser-cookies",
                     ],
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
@@ -56,8 +161,90 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(
             calls,
-            [("https://www.bilibili.com/video/BV1Ab411C7De", False)],
+            [("https://www.bilibili.com/video/BV1Ab411C7De", False, 21)],
         )
+
+    def test_browser_cookie_access_requires_explicit_opt_in(self):
+        info = {
+            "_type": "video",
+            "id": "BV1Ab411C7De",
+            "title": "Captioned video",
+            "subtitles": {
+                "ai-zh": [
+                    {
+                        "ext": "srt",
+                        "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                    }
+                ]
+            },
+        }
+        calls = []
+
+        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+            calls.append((url, use_browser_cookies, playlist_end))
+            return info
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(cli, "fetch_info", side_effect=fake_fetch):
+                exit_code = main(
+                    [
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "--output-root",
+                        temp_dir,
+                        "--use-browser-cookies",
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            calls,
+            [("https://www.bilibili.com/video/BV1Ab411C7De", True, 21)],
+        )
+
+    def test_configurable_part_limit_controls_probe_and_workflow_guard(self):
+        info = {
+            "_type": "playlist",
+            "id": "BV1Ab411C7De",
+            "title": "Six-part anthology",
+            "entries": [
+                {
+                    "id": f"BV1Ab411C7De_p{part}",
+                    "title": f"Part {part}",
+                    "webpage_url": f"https://www.bilibili.com/video/BV1Ab411C7De?p={part}",
+                    "subtitles": {},
+                }
+                for part in range(1, 7)
+            ],
+        }
+        calls = []
+
+        def fake_fetch(url, *, use_browser_cookies, playlist_end):
+            calls.append((url, use_browser_cookies, playlist_end))
+            return info
+
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(cli, "fetch_info", side_effect=fake_fetch):
+                exit_code = main(
+                    [
+                        "https://www.bilibili.com/video/BV1Ab411C7De",
+                        "--output-root",
+                        temp_dir,
+                        "--max-parts",
+                        "5",
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(
+            calls,
+            [("https://www.bilibili.com/video/BV1Ab411C7De", False, 6)],
+        )
+        self.assertIn("more than 5 parts", stderr.getvalue())
 
     def test_package_module_exposes_cli_help(self):
         completed = subprocess.run(

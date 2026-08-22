@@ -1,6 +1,8 @@
+import io
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,8 +60,39 @@ class BilibiliJsonToSrtTests(unittest.TestCase):
             "下一段\n",
         )
 
+    def test_rejects_an_unreasonably_large_cue_collection(self):
+        document = {
+            "body": [
+                {"from": 1, "to": 2, "content": "caption"},
+                {"from": 3, "to": 4, "content": "caption"},
+            ]
+        }
+
+        with patch.object(yt_dlp_adapter, "MAX_PUBLIC_CAPTION_CUES", 1):
+            with self.assertRaisesRegex(ValueError, "too many cues"):
+                bilibili_json_to_srt(document)
+
 
 class PublicRequestValidationTests(unittest.TestCase):
+    def test_public_json_download_has_a_hard_body_size_limit(self):
+        class FakeResponse(io.BytesIO):
+            headers = {}
+
+        class FakeOpener:
+            def open(self, _request, *, timeout):
+                self.timeout = timeout
+                return FakeResponse(b"123456789")
+
+        opener = FakeOpener()
+        with patch.object(yt_dlp_adapter, "MAX_PUBLIC_JSON_BYTES", 8):
+            with patch.object(yt_dlp_adapter, "build_opener", return_value=opener):
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    yt_dlp_adapter._download_public_json(
+                        "https://subtitle.bilibili.com/caption.json"
+                    )
+
+        self.assertEqual(opener.timeout, 30)
+
     def test_rejects_caption_url_with_non_https_port(self):
         secured = yt_dlp_adapter._secure_subtitle_url(
             "http://aisubtitle.hdslb.com:8080/caption.json"
@@ -306,6 +339,44 @@ class PublicCaptionFallbackTests(unittest.TestCase):
 
 
 class FetchInfoTests(unittest.TestCase):
+    def test_page_query_limits_yt_dlp_to_the_selected_part(self):
+        received_options = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                received_options.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+            def extract_info(self, _url, *, download):
+                if download:
+                    raise AssertionError("Media download must stay disabled")
+                return {
+                    "_type": "video",
+                    "id": "BV1Ab411C7De_p4",
+                    "title": "第四部分",
+                    "subtitles": {
+                        "ai-zh": [
+                            {
+                                "ext": "srt",
+                                "data": "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
+                            }
+                        ]
+                    },
+                }
+
+        fetch_info(
+            "https://www.bilibili.com/video/BV1Ab411C7De?p=4",
+            ydl_factory=FakeYoutubeDL,
+            use_browser_cookies=False,
+        )
+
+        self.assertEqual(received_options[0]["playlist_items"], "4")
+
     def test_can_skip_browser_cookie_access(self):
         received_options = []
 
@@ -344,6 +415,40 @@ class FetchInfoTests(unittest.TestCase):
 
         self.assertEqual(len(received_options), 1)
         self.assertNotIn("cookiesfrombrowser", received_options[0])
+        self.assertEqual(received_options[0]["playlistend"], 21)
+
+    def test_all_parts_can_disable_the_default_playlist_probe_limit(self):
+        received_options = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                received_options.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                return False
+
+            def extract_info(self, _url, *, download):
+                if download:
+                    raise AssertionError("Media download must stay disabled")
+                return {
+                    "_type": "video",
+                    "id": "BV1Ab411C7De",
+                    "title": "Public captioned video",
+                    "subtitles": {
+                        "ai-zh": [{"ext": "srt", "data": "caption"}]
+                    },
+                }
+
+        fetch_info(
+            "https://www.bilibili.com/video/BV1Ab411C7De",
+            ydl_factory=FakeYoutubeDL,
+            playlist_end=None,
+        )
+
+        self.assertNotIn("playlistend", received_options[0])
 
     def test_skips_public_api_when_yt_dlp_already_has_captions(self):
         expected_srt = "1\n00:00:01,000 --> 00:00:02,000\ncaption\n"
@@ -665,7 +770,7 @@ class FetchInfoTests(unittest.TestCase):
             "1\n00:00:01,000 --> 00:00:02,000\ncaption\n",
         )
 
-    def test_uses_chrome_login_state_for_the_first_extraction_attempt(self):
+    def test_explicit_opt_in_uses_chrome_for_the_first_attempt(self):
         created_options = []
 
         class FakeYoutubeDL:
@@ -692,6 +797,7 @@ class FetchInfoTests(unittest.TestCase):
         fetch_info(
             "https://www.bilibili.com/video/BV1Ab411C7De",
             ydl_factory=FakeYoutubeDL,
+            use_browser_cookies=True,
         )
 
         self.assertEqual(created_options[0].get("cookiesfrombrowser"), ("chrome",))
@@ -733,6 +839,7 @@ class FetchInfoTests(unittest.TestCase):
                 ydl_factory=fake_ydl_factory,
                 cookie_error_type=FakeCookieLoadError,
                 warn=warnings.append,
+                use_browser_cookies=True,
             )
         except TypeError as error:
             self.fail(f"fetch_info must support cookie fallback inputs: {error}")
@@ -789,6 +896,7 @@ class FetchInfoTests(unittest.TestCase):
                 ydl_factory=fake_ydl_factory,
                 cookie_error_type=FakeCookieLoadError,
                 warn=warnings.append,
+                use_browser_cookies=True,
             )
         except FakeDownloadError as error:
             self.fail(f"Wrapped cookie errors must trigger anonymous retry: {error}")

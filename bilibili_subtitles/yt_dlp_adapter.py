@@ -11,6 +11,8 @@ _API_HOSTS = frozenset({"api.bilibili.com"})
 _CAPTION_HOSTS = frozenset(
     {"aisubtitle.hdslb.com", "subtitle.bilibili.com"}
 )
+MAX_PUBLIC_JSON_BYTES = 8 * 1024 * 1024
+MAX_PUBLIC_CAPTION_CUES = 100_000
 
 
 class PublicCaptionLookupError(RuntimeError):
@@ -64,6 +66,8 @@ def _srt_timestamp(seconds: float) -> str:
 def bilibili_json_to_srt(document: dict) -> str:
     if not isinstance(document, dict) or not isinstance(document.get("body"), list):
         raise ValueError("Public caption document has no body list.")
+    if len(document["body"]) > MAX_PUBLIC_CAPTION_CUES:
+        raise ValueError("Public caption document contains too many cues.")
     blocks = []
     for cue in document["body"]:
         if (
@@ -102,7 +106,26 @@ def _download_public_json(url: str) -> dict:
     )
     opener = build_opener(_BoundaryRedirectHandler(allowed_hosts))
     with opener.open(request, timeout=30) as response:
-        return json.load(response)
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_PUBLIC_JSON_BYTES:
+                    raise PublicCaptionLookupError(
+                        "Public caption response exceeds the size limit."
+                    )
+            except ValueError:
+                pass
+        payload = response.read(MAX_PUBLIC_JSON_BYTES + 1)
+        if len(payload) > MAX_PUBLIC_JSON_BYTES:
+            raise PublicCaptionLookupError(
+                "Public caption response exceeds the size limit."
+            )
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise PublicCaptionLookupError(
+                "Public caption response is not valid UTF-8 JSON."
+            ) from error
 
 
 def _api_data(document: dict, endpoint: str) -> dict:
@@ -393,8 +416,10 @@ def fetch_info(
     cookie_error_type=(),
     warn=None,
     public_json_fetcher=None,
-    use_browser_cookies=True,
+    use_browser_cookies=False,
+    playlist_end: int | None = 21,
 ) -> dict:
+    parsed_url = parse_bv_url(url)
     use_public_fallback = ydl_factory is None or public_json_fetcher is not None
     install_bounded_extractor = ydl_factory is None
     if ydl_factory is None:
@@ -409,6 +434,12 @@ def fetch_info(
         "extract_flat": False,
         "writesubtitles": True,
     }
+    if parsed_url.page is not None:
+        base_options["playlist_items"] = str(parsed_url.page)
+    elif playlist_end is not None:
+        if playlist_end < 1:
+            raise ValueError("playlist_end must be positive or None.")
+        base_options["playlistend"] = playlist_end
 
     def extract(options: dict) -> dict:
         with ydl_factory(options) as ydl:
